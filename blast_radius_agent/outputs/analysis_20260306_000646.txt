@@ -1,0 +1,28 @@
+AI Blast Radius Analysis Result
+Generated: 2026-03-06 00:06:46
+============================================================
+
+ Root Cause:
+The root cause of the bug is an unintended side effect from a refactoring in `login_service.py`. The developer attempted to simplify the code by removing the explicit call to `user.data` when retrieving the user object, assuming that it would still be accessible due to Python's automatic unpacking behavior. However, the `get_user()` function now returns a `NoneType` object when the user is not found in the database, causing an AttributeError since `NoneType` objects do not have a `data` attribute.
+
+Impacted Modules:
+1. `login_service.py` - The bug was introduced here and affects the login functionality.
+2. `auth_controller.py` - It handles the /api/login endpoint, and it is affected because it calls the broken `login()` function from `login_service.py`.
+
+Risk Level:
+The risk level is MEDIUM. Although the bug only affects the login functionality, it results in a critical 500 Internal Server Error instead of returning a proper error message to the client. This could potentially lead to confusion and poor user experience. Additionally, multiple failed login attempts are being logged, which might indicate potential brute-force attacks if not handled properly.
+
+Suggested Fix:
+1. In `login_service.py`, check if the user object is None before accessing its attributes:
+
+```python
+def login(username: str, password: str):
+    user = get_user(username)
+    if user is None:
+        return {"error": "Invalid credentials", "status": 401}
+
+    # Verify the password and generate token as before...
+```
+
+Explanation:
+The change in `login_service.py` caused the bug by assuming that the user object always has a `data` attribute, which is not the case when the user does not exist in the database. This affected both `login_service.py` and `auth_controller.py`, increasing the risk level to MEDIUM due to the critical nature of the 500 Internal Server Error and potential security concerns from multiple failed login attempts being logged. The suggested fix ensures that the user object is checked for None before accessing its attributes, preventing the AttributeError and returning a proper error message to the client.

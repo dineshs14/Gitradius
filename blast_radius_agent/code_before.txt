@@ -1,0 +1,23 @@
+# login_service.py — BEFORE the change
+
+from user_service import get_user
+from auth_controller import create_token, verify_password
+
+
+def login(username: str, password: str):
+    """Authenticate a user and return a JWT token."""
+
+    # Look up the user by username
+    user = get_user(username)
+
+    # Handle case where user does not exist
+    if user is None:
+        return {"error": "Invalid credentials", "status": 401}
+
+    # Verify the password
+    if not verify_password(password, user.password_hash):
+        return {"error": "Invalid credentials", "status": 401}
+
+    # Generate and return auth token
+    token = create_token(user.id, user.role)
+    return {"token": token, "status": 200}

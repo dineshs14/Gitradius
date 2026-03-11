@@ -1,0 +1,148 @@
+{
+  "project": "Kani-Store",
+  "tickets": [
+    {
+      "id": "KS-101",
+      "title": "Add product image gallery with zoom on hover",
+      "status": "In Progress",
+      "priority": "High",
+      "assignee": "dev1@kanistore.com",
+      "reporter": "pm@kanistore.com",
+      "created": "2025-01-10T09:00:00",
+      "updated": "2025-01-15T14:30:00",
+      "description": "Users need a better product viewing experience. Implement an image gallery with thumbnail navigation and zoom-on-hover capability. The gallery should support multiple product images stored in constants.ts.",
+      "labels": ["frontend", "ui", "enhancement"],
+      "sprint": "Sprint 4",
+      "story_points": 5,
+      "comments": [
+        {
+          "id": "c1",
+          "author": "dev1@kanistore.com",
+          "body": "Working on this — will need to update types.ts to add 'images' array to Product interface.",
+          "created": "2025-01-12T10:00:00"
+        },
+        {
+          "id": "c2",
+          "author": "pm@kanistore.com",
+          "body": "Make sure zoom works on mobile too — pinch-to-zoom should be supported.",
+          "created": "2025-01-13T11:00:00"
+        }
+      ]
+    },
+    {
+      "id": "KS-102",
+      "title": "Fix cart item quantity update not persisting on page reload",
+      "status": "Open",
+      "priority": "Critical",
+      "assignee": "dev2@kanistore.com",
+      "reporter": "qa@kanistore.com",
+      "created": "2025-01-14T16:00:00",
+      "updated": "2025-01-14T16:00:00",
+      "description": "BUG: When users update cart item quantities and reload the page, the changes are lost. Cart state is not being persisted to localStorage correctly. This is a critical UX issue affecting conversion rates.",
+      "labels": ["bug", "critical", "cart", "localStorage"],
+      "sprint": "Sprint 4",
+      "story_points": 3,
+      "comments": [
+        {
+          "id": "c3",
+          "author": "qa@kanistore.com",
+          "body": "Steps to reproduce: 1) Add 3 items to cart, 2) Change quantity to 5, 3) Reload page → quantity resets to 3. Happens in Chrome and Firefox.",
+          "created": "2025-01-14T16:30:00"
+        }
+      ]
+    },
+    {
+      "id": "KS-103",
+      "title": "Implement AI-powered product recommendations using Gemini",
+      "status": "To Do",
+      "priority": "High",
+      "assignee": "dev1@kanistore.com",
+      "reporter": "cto@kanistore.com",
+      "created": "2025-01-08T10:00:00",
+      "updated": "2025-01-10T15:00:00",
+      "description": "Leverage the existing Gemini AI integration (services/geminiService.ts) to provide personalized product recommendations based on user browsing history, cart contents, and past orders. The recommendations should appear on the Home page and Product detail page.",
+      "labels": ["ai", "gemini", "feature", "personalization"],
+      "sprint": "Sprint 5",
+      "story_points": 8,
+      "comments": [
+        {
+          "id": "c4",
+          "author": "dev1@kanistore.com",
+          "body": "We can extend the existing Gemini service. Need to pass cartItems[] and order history as context. Will need new 'getRecommendations' function in geminiService.ts.",
+          "created": "2025-01-10T09:15:00"
+        }
+      ]
+    },
+    {
+      "id": "KS-104",
+      "title": "Admin panel: Add bulk product import via CSV",
+      "status": "In Review",
+      "priority": "Medium",
+      "assignee": "dev3@kanistore.com",
+      "reporter": "admin@kanistore.com",
+      "created": "2025-01-05T08:00:00",
+      "updated": "2025-01-15T12:00:00",
+      "description": "Admin users need to import products in bulk rather than adding them one by one. Implement a CSV upload feature in the Admin panel that parses the file and adds products to the PRODUCTS array in constants.ts (or database in future).",
+      "labels": ["admin", "import", "csv", "enhancement"],
+      "sprint": "Sprint 4",
+      "story_points": 5,
+      "comments": [
+        {
+          "id": "c5",
+          "author": "dev3@kanistore.com",
+          "body": "PR raised at #47. CSV format: id,name,price,category,stock,description,rating. Added validation for required fields.",
+          "created": "2025-01-15T11:00:00"
+        },
+        {
+          "id": "c6",
+          "author": "qa@kanistore.com",
+          "body": "Reviewing now — tested with 50 products CSV, looks good. One minor issue: duplicate product IDs should be rejected.",
+          "created": "2025-01-15T13:30:00"
+        }
+      ]
+    },
+    {
+      "id": "KS-105",
+      "title": "Performance: Product list renders slowly with 100+ items",
+      "status": "Open",
+      "priority": "Medium",
+      "assignee": null,
+      "reporter": "dev2@kanistore.com",
+      "created": "2025-01-11T14:00:00",
+      "updated": "2025-01-11T14:00:00",
+      "description": "The product listing page becomes sluggish when constants.ts has more than 100 products. We need to implement virtual scrolling or pagination. Currently App.tsx renders all products without any virtualization.",
+      "labels": ["performance", "frontend", "optimization"],
+      "sprint": "Backlog",
+      "story_points": 5,
+      "comments": []
+    },
+    {
+      "id": "KS-106",
+      "title": "Add order tracking with status timeline",
+      "status": "Done",
+      "priority": "Medium",
+      "assignee": "dev1@kanistore.com",
+      "reporter": "pm@kanistore.com",
+      "created": "2025-01-01T09:00:00",
+      "updated": "2025-01-13T17:00:00",
+      "description": "Users should be able to track their orders with a visual timeline showing: Order Placed → Processing → Shipped → Delivered. Use the Order interface in types.ts.",
+      "labels": ["feature", "orders", "ui"],
+      "sprint": "Sprint 3",
+      "story_points": 3,
+      "comments": [
+        {
+          "id": "c7",
+          "author": "dev1@kanistore.com",
+          "body": "Completed and merged. Updated Order type to include 'trackingEvents' array.",
+          "created": "2025-01-13T16:45:00"
+        }
+      ]
+    }
+  ],
+  "sprints": {
+    "current": "Sprint 4",
+    "velocity": 24,
+    "planned_points": 20,
+    "completed_points": 8
+  }
+}

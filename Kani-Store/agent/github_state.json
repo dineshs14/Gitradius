@@ -1,0 +1,93 @@
+{
+  "repo": "Kani-Store",
+  "branch": "main",
+  "remote": "https://github.com/your-org/kani-store",
+  "commits": [
+    {
+      "hash": "a3f9e21",
+      "author": "Dev One",
+      "email": "dev1@kanistore.com",
+      "date": "2025-01-15T14:22:10",
+      "message": "KS-101: Begin product image gallery scaffold — add 'images' field to Product type",
+      "changed_files": [
+        {"status": "modified", "path": "types.ts"},
+        {"status": "modified", "path": "constants.ts"}
+      ],
+      "stats": {"additions": 34, "deletions": 5}
+    },
+    {
+      "hash": "b7c4d55",
+      "author": "Dev Two",
+      "email": "dev2@kanistore.com",
+      "date": "2025-01-15T11:05:42",
+      "message": "KS-102: Investigate cart persistence bug — add debug logging",
+      "changed_files": [
+        {"status": "modified", "path": "App.tsx"}
+      ],
+      "stats": {"additions": 12, "deletions": 2}
+    },
+    {
+      "hash": "c2e881a",
+      "author": "Dev Three",
+      "email": "dev3@kanistore.com",
+      "date": "2025-01-15T09:30:19",
+      "message": "KS-104: Admin CSV import — add file upload component and parser",
+      "changed_files": [
+        {"status": "modified", "path": "App.tsx"},
+        {"status": "added",    "path": "utils/csvParser.ts"}
+      ],
+      "stats": {"additions": 145, "deletions": 10}
+    },
+    {
+      "hash": "d1f5c92",
+      "author": "Dev One",
+      "email": "dev1@kanistore.com",
+      "date": "2025-01-14T18:00:01",
+      "message": "KS-106: Add order tracking timeline with status events",
+      "changed_files": [
+        {"status": "modified", "path": "types.ts"},
+        {"status": "modified", "path": "App.tsx"},
+        {"status": "modified", "path": "constants.ts"}
+      ],
+      "stats": {"additions": 89, "deletions": 15}
+    },
+    {
+      "hash": "e9a3b77",
+      "author": "Dev Two",
+      "email": "dev2@kanistore.com",
+      "date": "2025-01-13T14:22:05",
+      "message": "chore: update dependencies (react 18.3, typescript 5.6)",
+      "changed_files": [
+        {"status": "modified", "path": "package.json"},
+        {"status": "modified", "path": "package-lock.json"}
+      ],
+      "stats": {"additions": 320, "deletions": 290}
+    },
+    {
+      "hash": "f4d2a11",
+      "author": "Dev Three",
+      "email": "dev3@kanistore.com",
+      "date": "2025-01-12T10:30:00",
+      "message": "feat: Gemini AI chatbot integration with context-aware responses",
+      "changed_files": [
+        {"status": "added",    "path": "services/geminiService.ts"},
+        {"status": "modified", "path": "types.ts"},
+        {"status": "modified", "path": "App.tsx"}
+      ],
+      "stats": {"additions": 230, "deletions": 45}
+    }
+  ],
+  "open_prs": [
+    {
+      "number": 47,
+      "title": "KS-104: Admin bulk CSV product import",
+      "author": "dev3@kanistore.com",
+      "status": "open",
+      "reviewers": ["dev1@kanistore.com"],
+      "created": "2025-01-15T11:00:00",
+      "head_branch": "feature/KS-104-csv-import",
+      "base_branch": "main",
+      "checks": "passing"
+    }
+  ]
+}

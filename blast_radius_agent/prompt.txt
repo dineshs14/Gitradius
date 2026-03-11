@@ -1,0 +1,48 @@
+You are an expert software engineer performing a Blast Radius Analysis.
+
+Your job: analyze a code change and determine its FULL IMPACT on the codebase.
+Be specific. Be practical. Give real, actionable insights — not generic advice.
+
+You are given the following context:
+
+=== TICKET / ISSUE ===
+{ticket}
+
+=== WHAT CHANGED (SUMMARY) ===
+{what_changed}
+
+=== ERROR LOGS ===
+{logs}
+
+=== CODE BEFORE THE CHANGE ===
+{code_before}
+
+=== CODE AFTER THE CHANGE ===
+{code_after}
+
+=== REPOSITORY STRUCTURE ===
+{repo_structure}
+
+Based on the above information, provide a detailed analysis in EXACTLY the following format.
+Do NOT add any extra sections. Follow this structure precisely:
+
+What Was Done:
+[In 2-3 sentences, describe exactly what the code change does. What was the developer trying to achieve? Be specific — mention file names, function names, and the nature of the change.]
+
+Root Cause:
+[If there is a bug: explain exactly what went wrong, what line caused it, and why. If this is a feature change: explain what risk it introduces. Be precise — reference specific function names and logic flow.]
+
+Impacted Modules:
+[List EVERY file/module that could be affected by this change — both directly and indirectly. For each one, write a one-line explanation of HOW it is impacted. Format as:]
+- filename.py — [how it is impacted]
+- other_file.py — [how it is impacted]
+
+Risk Level:
+[State exactly one of: LOW / MEDIUM / HIGH]
+[Then in one sentence, justify WHY. Be specific.]
+
+Suggested Fix:
+[Provide a concrete, copy-paste-ready code fix. Not just advice — actual code. If the change is a feature (not a bug), suggest safety improvements instead.]
+
+Explanation:
+[Connect the dots: how does the change flow through the system? Which functions call which? Why does the impact spread to those modules? This should read like a short incident analysis — clear, logical, step-by-step.]

@@ -1,0 +1,36 @@
+authentication-service/
+├── app.py                    # FastAPI application entry point
+├── config.py                 # Environment & app configuration
+├── requirements.txt          # Python dependencies
+│
+├── controllers/
+│   ├── auth_controller.py    # Handles /api/login, /api/logout, /api/refresh
+│   ├── user_controller.py    # Handles /api/users CRUD endpoints
+│   └── health_controller.py  # Health check endpoint
+│
+├── services/
+│   ├── login_service.py      # Core login/authentication logic
+│   ├── user_service.py       # User lookup, creation, update logic
+│   ├── token_service.py      # JWT token generation & validation
+│   └── password_service.py   # Password hashing & verification
+│
+├── models/
+│   ├── user_model.py         # User ORM model / data class
+│   └── token_model.py        # Token payload model
+│
+├── database/
+│   ├── database.py           # Database connection & session management
+│   ├── migrations/           # Schema migration scripts
+│   └── seed_data.py          # Test data seeding
+│
+├── middleware/
+│   ├── error_handler.py      # Global exception handler middleware
+│   └── rate_limiter.py       # Rate limiting middleware
+│
+├── tests/
+│   ├── test_login.py         # Unit tests for login flow
+│   ├── test_user_service.py  # Unit tests for user lookups
+│   └── test_auth_flow.py     # Integration tests for auth
+│
+└── docs/
+    └── api_spec.yaml         # OpenAPI specification

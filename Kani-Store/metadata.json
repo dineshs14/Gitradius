@@ -1,0 +1,7 @@
+{
+  "name": "Kani Store",
+  "description": "An online e-commerce platform for Kani Store (Annachi Kadai), offering a wide range of groceries and household essentials with a modern interface and an innovative AI-powered 'Order by Picture' feature.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

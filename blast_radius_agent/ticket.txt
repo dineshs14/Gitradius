@@ -1,0 +1,26 @@
+Title: Login API crash when user not found
+
+Priority: P1 - Critical
+Reporter: Backend Team
+Component: Authentication Service
+
+Description:
+The login endpoint crashes with a 500 Internal Server Error when a user
+attempts to log in with a username that does not exist in the database.
+
+Instead of returning a proper 401 Unauthorized or 404 Not Found response,
+the server throws an unhandled AttributeError and the request fails entirely.
+
+This was introduced after a recent refactoring of the user lookup logic
+in login_service.py.
+
+Steps to Reproduce:
+1. Send a POST request to /api/login with a non-existent username
+2. Observe the 500 error response
+3. Check server logs for the AttributeError traceback
+
+Expected Behavior:
+The API should return a 401 response with a message like "Invalid credentials"
+
+Actual Behavior:
+The API crashes with: AttributeError: 'NoneType' object has no attribute 'data'

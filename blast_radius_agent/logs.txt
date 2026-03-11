@@ -1,0 +1,19 @@
+[2026-03-05 14:32:17] ERROR in login_service.py:
+Traceback (most recent call last):
+  File "login_service.py", line 42, in login
+    user = get_user(username).data
+AttributeError: 'NoneType' object has no attribute 'data'
+
+[2026-03-05 14:32:17] ERROR in auth_controller.py:
+  Unhandled exception in POST /api/login
+  Request payload: {"username": "john_doe_99", "password": "***"}
+  Response: 500 Internal Server Error
+
+[2026-03-05 14:33:01] ERROR in login_service.py:
+Traceback (most recent call last):
+  File "login_service.py", line 42, in login
+    user = get_user(username).data
+AttributeError: 'NoneType' object has no attribute 'data'
+
+[2026-03-05 14:33:01] WARNING in auth_controller.py:
+  Multiple failed login attempts detected from IP 192.168.1.45
