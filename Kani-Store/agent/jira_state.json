@@ -11,7 +11,12 @@
       "created": "2025-01-10T09:00:00",
       "updated": "2025-01-15T14:30:00",
       "description": "Users need a better product viewing experience. Implement an image gallery with thumbnail navigation and zoom-on-hover capability. The gallery should support multiple product images stored in constants.ts.",
-      "labels": ["frontend", "ui", "enhancement"],
+      "labels": ["frontend", "ui", "enhancement", "image"],
+      "expected_changes": {
+        "types.ts": "Add 'images: string[]' field to Product interface",
+        "constants.ts": "Add 'images' array with URLs to each product in PRODUCTS",
+        "App.tsx": "Add image gallery component with thumbnail nav and hover zoom"
+      },
       "sprint": "Sprint 4",
       "story_points": 5,
       "comments": [
@@ -40,6 +45,10 @@
       "updated": "2025-01-14T16:00:00",
       "description": "BUG: When users update cart item quantities and reload the page, the changes are lost. Cart state is not being persisted to localStorage correctly. This is a critical UX issue affecting conversion rates.",
       "labels": ["bug", "critical", "cart", "localStorage"],
+      "expected_changes": {
+        "App.tsx": "Add localStorage.setItem on every cart state mutation; read on mount",
+        "types.ts": "Verify CartItem interface includes all persisted fields"
+      },
       "sprint": "Sprint 4",
       "story_points": 3,
       "comments": [
@@ -61,7 +70,12 @@
       "created": "2025-01-08T10:00:00",
       "updated": "2025-01-10T15:00:00",
       "description": "Leverage the existing Gemini AI integration (services/geminiService.ts) to provide personalized product recommendations based on user browsing history, cart contents, and past orders. The recommendations should appear on the Home page and Product detail page.",
-      "labels": ["ai", "gemini", "feature", "personalization"],
+      "labels": ["ai", "gemini", "feature", "personalization", "recommendation"],
+      "expected_changes": {
+        "services/geminiService.ts": "Add getRecommendations(cartItems, orderHistory) function",
+        "types.ts": "Add RecommendationResult or extend ChatMessage interface if needed",
+        "App.tsx": "Render recommendations section on Home/Product page using service"
+      },
       "sprint": "Sprint 5",
       "story_points": 8,
       "comments": [
@@ -83,7 +97,12 @@
       "created": "2025-01-05T08:00:00",
       "updated": "2025-01-15T12:00:00",
       "description": "Admin users need to import products in bulk rather than adding them one by one. Implement a CSV upload feature in the Admin panel that parses the file and adds products to the PRODUCTS array in constants.ts (or database in future).",
-      "labels": ["admin", "import", "csv", "enhancement"],
+      "labels": ["admin", "import", "csv", "enhancement", "bulk"],
+      "expected_changes": {
+        "App.tsx": "Add CSV file upload input + preview table in Admin panel",
+        "utils/csvParser.ts": "Create/update CSV parser returning Product[] from raw CSV text",
+        "types.ts": "Ensure Product interface covers all CSV columns"
+      },
       "sprint": "Sprint 4",
       "story_points": 5,
       "comments": [
@@ -111,7 +130,11 @@
       "created": "2025-01-11T14:00:00",
       "updated": "2025-01-11T14:00:00",
       "description": "The product listing page becomes sluggish when constants.ts has more than 100 products. We need to implement virtual scrolling or pagination. Currently App.tsx renders all products without any virtualization.",
-      "labels": ["performance", "frontend", "optimization"],
+      "labels": ["performance", "frontend", "optimization", "paginate"],
+      "expected_changes": {
+        "App.tsx": "Implement pagination or React virtual list for product grid",
+        "constants.ts": "Optionally move large product list to a lazy-loaded module"
+      },
       "sprint": "Backlog",
       "story_points": 5,
       "comments": []
@@ -126,7 +149,12 @@
       "created": "2025-01-01T09:00:00",
       "updated": "2025-01-13T17:00:00",
       "description": "Users should be able to track their orders with a visual timeline showing: Order Placed → Processing → Shipped → Delivered. Use the Order interface in types.ts.",
-      "labels": ["feature", "orders", "ui"],
+      "labels": ["feature", "orders", "ui", "type"],
+      "expected_changes": {
+        "types.ts": "Add 'trackingEvents: TrackingEvent[]' to Order interface; add TrackingEvent type",
+        "constants.ts": "Add trackingEvents sample data to mock orders",
+        "App.tsx": "Render order timeline component in Orders page"
+      },
       "sprint": "Sprint 3",
       "story_points": 3,
       "comments": [
@@ -137,12 +165,39 @@
           "created": "2025-01-13T16:45:00"
         }
       ]
+    },
+    {
+      "id": "KS-107",
+      "title": "Remove phone number field from checkout and Address interface",
+      "status": "In Progress",
+      "priority": "High",
+      "assignee": "dev2@kanistore.com",
+      "reporter": "privacy@kanistore.com",
+      "created": "2025-01-16T09:00:00",
+      "updated": "2025-01-16T09:00:00",
+      "description": "GDPR compliance: Remove the 'phone' field from the Address interface and all checkout forms. The field is collected but never used for delivery and represents unnecessary PII. Must be removed from types.ts Address interface, App.tsx checkout form, and any constants.ts mock data.",
+      "labels": ["gdpr", "privacy", "type", "address", "phone", "remove field"],
+      "expected_changes": {
+        "types.ts": "Remove 'phone?: string' from Address interface",
+        "App.tsx": "Remove phone input from checkout form; remove phone from Address object construction",
+        "constants.ts": "Remove phone from any mock Address objects in PRODUCTS or orders"
+      },
+      "sprint": "Sprint 5",
+      "story_points": 2,
+      "comments": [
+        {
+          "id": "c8",
+          "author": "privacy@kanistore.com",
+          "body": "This field is not used anywhere in the delivery pipeline. Removing it reduces GDPR surface area. Make sure ALL usages are updated — a partial removal will cause TypeScript compile errors.",
+          "created": "2025-01-16T09:30:00"
+        }
+      ]
     }
   ],
   "sprints": {
-    "current": "Sprint 4",
+    "current": "Sprint 5",
     "velocity": 24,
-    "planned_points": 20,
-    "completed_points": 8
+    "planned_points": 22,
+    "completed_points": 11
   }
 }

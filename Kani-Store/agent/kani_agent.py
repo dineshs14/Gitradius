@@ -1,132 +1,220 @@
 """
-Kani-Store Local AI Engineering Agent
-=======================================
-A local AI-powered agent that monitors Jira, GitHub commits, and
-local code changes for the Kani-Store project.
+Kani-Store Smart Engineering Agent
+=====================================
+An autonomous code-review agent that connects Git commits with Jira tickets,
+detects breaking changes, traces ripple effects across all layers, and flags
+incomplete or inconsistent implementations.
 
-Since this is a prototype (no real APIs), it works via:
-  - jira_state.txt   → simulates Jira tickets
-  - github_state.txt → simulates GitHub commits
-  - Local git diff   → detects real code changes
+Four pillars:
+  1. COMMIT ANALYSIS       — detect failures / breaking changes per commit
+  2. JIRA COMPLETENESS     — validate every ticket has matching code changes
+  3. RIPPLE EFFECT ENGINE  — trace how changes propagate across all layers
+  4. FAILURE INSIGHT       — explain root cause + corrective actions via AI
 
-Output Format (always):
-  1. Jira Update Summary
-  2. Latest GitHub Commit Summary
-  3. Code Change Impact Analysis
-  4. Affected Modules
-  5. Recommendations
+Supports both simulated data (json files) and real git + Jira/GitHub APIs.
 
 Usage:
-  python kani_agent.py                    # Full analysis (all 3 sources)
-  python kani_agent.py --jira             # Only Jira updates
-  python kani_agent.py --github          # Only GitHub commits
-  python kani_agent.py --code            # Only code impact analysis
-  python kani_agent.py --watch           # Watch mode (runs every 30s)
+  python kani_agent.py             # full analysis (all 4 pillars)
+  python kani_agent.py --jira      # Jira-only
+  python kani_agent.py --github    # GitHub-only
+  python kani_agent.py --code      # code diff only
+  python kani_agent.py --ai        # include Ollama AI deep-analysis
+  python kani_agent.py --commit abc1234   # analyze specific commit
+  python kani_agent.py --watch     # continuous watch mode (re-runs on change)
 """
 
-import argparse
-import json
-import os
-import sys
-import time
-import subprocess
-import hashlib
-import re
-from datetime import datetime
+from __future__ import annotations
 
-# ── Fix Windows console encoding (cp1252 → UTF-8) ──────────────────────────
+import sys, os, io, re, json, hashlib, time, subprocess, argparse, textwrap
+from datetime import datetime
+from typing import Any
+
+# Fix Windows console encoding
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# ──────────────────────────────────────────────
-# Configuration
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# Paths & config
+# ─────────────────────────────────────────────────────────────────
 
 AGENT_DIR    = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 
-# The simulated data files (prototype: no real APIs)
 JIRA_STATE_FILE   = os.path.join(AGENT_DIR, "jira_state.json")
 GITHUB_STATE_FILE = os.path.join(AGENT_DIR, "github_state.json")
 LAST_STATE_FILE   = os.path.join(AGENT_DIR, ".last_state.json")
 OUTPUTS_DIR       = os.path.join(AGENT_DIR, "outputs")
 
-# Kani-Store project structure (used for dependency graph)
-KANI_MODULES = {
-    "App.tsx":              ["types.ts", "constants.ts", "services/geminiService.ts", "components/Icons.tsx"],
-    "constants.ts":         ["types.ts"],
-    "types.ts":             [],
-    "index.tsx":            ["App.tsx"],
-    "services/geminiService.ts": ["types.ts"],
-    "components/Icons.tsx": [],
-    "index.html":           ["index.tsx"],
-    "vite.config.ts":       [],
-    "package.json":         [],
-    "tsconfig.json":        [],
-}
-
-# Critical files — changes here have HIGH impact
-CRITICAL_FILES = {"App.tsx", "types.ts", "constants.ts", "services/geminiService.ts"}
-
-# Ollama config
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_URL    = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "mistral"
 
-# ──────────────────────────────────────────────
-# ANSI Colors
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# Kani-Store dependency graph (layered architecture)
+# ─────────────────────────────────────────────────────────────────
+
+# Full dependency map: file → files it imports from
+KANI_DEPS: dict[str, list[str]] = {
+    "index.tsx":                    ["App.tsx"],
+    "App.tsx":                      ["types.ts", "constants.ts",
+                                     "services/geminiService.ts",
+                                     "components/Icons.tsx"],
+    "constants.ts":                 ["types.ts"],
+    "services/geminiService.ts":    ["types.ts"],
+    "components/Icons.tsx":         [],
+    "types.ts":                     [],
+    "index.html":                   ["index.tsx"],
+    "vite.config.ts":               [],
+    "package.json":                 [],
+    "tsconfig.json":                [],
+    "utils/csvParser.ts":           ["types.ts"],
+}
+
+# Layer model: each layer feeds the next
+LAYERS = {
+    "L1_UI":       ["App.tsx", "components/Icons.tsx", "index.tsx", "index.html"],
+    "L2_TYPES":    ["types.ts"],
+    "L3_DATA":     ["constants.ts", "utils/csvParser.ts"],
+    "L4_SERVICES": ["services/geminiService.ts"],
+    "L5_CONFIG":   ["vite.config.ts", "tsconfig.json", "package.json"],
+}
+
+LAYER_LABELS = {
+    "L1_UI":       "Frontend / UI Components",
+    "L2_TYPES":    "Type Contracts (TypeScript interfaces)",
+    "L3_DATA":     "Data / Constants / Mock DB",
+    "L4_SERVICES": "Service Layer / External APIs",
+    "L5_CONFIG":   "Build Config / Dependencies",
+}
+
+CRITICAL_FILES = {"App.tsx", "types.ts", "constants.ts", "services/geminiService.ts"}
+
+# ─────────────────────────────────────────────────────────────────
+# Jira ticket → expected code layers
+# ─────────────────────────────────────────────────────────────────
+
+TICKET_KEYWORD_LAYERS: list[tuple[list[str], list[str], str]] = [
+    (["type", "interface", "schema", "model", "field", "remove field",
+      "add field", "phone", "email", "address"],
+     ["types.ts"],
+     "Schema/type change → types.ts MUST be updated"),
+
+    (["product", "catalog", "price", "stock", "category", "mock data",
+      "products array", "recommendation"],
+     ["constants.ts", "types.ts"],
+     "Product data change → constants.ts + types.ts MUST be updated"),
+
+    (["cart", "checkout", "order", "payment", "quantity", "persist",
+      "localstorage"],
+     ["App.tsx", "types.ts"],
+     "Cart/Order flow → App.tsx + types.ts MUST be updated"),
+
+    (["ui", "component", "design", "layout", "page", "gallery", "zoom",
+      "image", "icon", "button", "form"],
+     ["App.tsx"],
+     "UI change → App.tsx MUST be updated"),
+
+    (["ai", "gemini", "chatbot", "recommendation", "service", "api"],
+     ["services/geminiService.ts", "types.ts"],
+     "AI/service change → geminiService.ts + types.ts MUST be updated"),
+
+    (["admin", "import", "csv", "bulk", "upload"],
+     ["App.tsx", "utils/csvParser.ts", "types.ts"],
+     "Admin/import change → App.tsx + csvParser.ts + types.ts required"),
+
+    (["performance", "lazy", "memo", "virtual", "paginate"],
+     ["App.tsx", "constants.ts"],
+     "Performance change → App.tsx + constants.ts to check"),
+
+    (["dependency", "package", "upgrade", "version"],
+     ["package.json"],
+     "Dependency change → package.json MUST be updated"),
+]
+
+# Breaking-change pattern detectors (applied to diff text)
+BREAKING_PATTERNS: list[tuple[str, str, str]] = [
+    (r"^-\s*(interface|type)\s+(\w+)",
+     "Interface/type REMOVED or renamed",
+     "All files importing this type will break. Check all imports."),
+
+    (r"^-\s+(\w+)\s*[?:]",
+     "Field REMOVED from interface",
+     "Any code accessing this field will throw a runtime error."),
+
+    (r"^-\s*export\s+(const|function|class|default)\s+(\w+)",
+     "Exported symbol REMOVED",
+     "All importers of this symbol will fail to compile."),
+
+    (r"^-\s*import\s+.*from",
+     "Import REMOVED",
+     "Dependency removed — verify nothing else needs it."),
+
+    (r"^\+\s*(interface|type)\s+(\w+)",
+     "New interface/type ADDED",
+     "Ensure all layers that use this type are updated consistently."),
+
+    (r"^\+\s+(\w+)\s*[?:]",
+     "New field ADDED to interface",
+     "Ensure constants.ts mock data and App.tsx are updated to include this field."),
+
+    (r"localStorage\.(remove|clear)",
+     "localStorage cleared/removed",
+     "Cart/session persistence may be broken — test page reload behaviour."),
+
+    (r"(delete|DROP|ALTER|TRUNCATE)\s+\w+",
+     "Destructive data operation detected",
+     "Verify data integrity and ensure backups exist."),
+
+    (r"password|secret|token|api_key|apikey",
+     "Possible credential in diff",
+     "SECURITY: Ensure no secrets are committed. Use environment variables."),
+]
+
+# ─────────────────────────────────────────────────────────────────
+# ANSI colour helpers
+# ─────────────────────────────────────────────────────────────────
 
 C = {
-    "reset":   "\033[0m",
-    "bold":    "\033[1m",
-    "red":     "\033[91m",
-    "green":   "\033[92m",
-    "yellow":  "\033[93m",
-    "blue":    "\033[94m",
-    "magenta": "\033[95m",
-    "cyan":    "\033[96m",
-    "dim":     "\033[2m",
+    "reset":   "\033[0m",  "bold":  "\033[1m",  "dim":    "\033[2m",
+    "red":     "\033[91m", "green": "\033[92m",  "yellow": "\033[93m",
+    "blue":    "\033[94m", "magenta": "\033[95m","cyan":   "\033[96m",
     "white":   "\033[97m",
 }
 
-def c(text, color):
-    return f"{C.get(color,'')}{text}{C['reset']}"
+def col(t: str, c: str) -> str:
+    return f"{C.get(c,'')}{t}{C['reset']}"
 
-def section(title, icon="▸"):
-    print(f"\n{c(f'  {icon}  {title}', 'bold')}")
-    print(c("  " + "─" * 56, "dim"))
+def section(title: str, icon: str = "▸"):
+    print(f"\n{col(f'  {icon}  {title}', 'bold')}")
+    print(col("  " + "─" * 60, "dim"))
 
-def status(msg, icon="•", color="green"):
-    print(f"  {c(icon, color)} {msg}")
+def ok(msg: str):   print(f"  {col('✓', 'green')} {msg}")
+def info(msg: str): print(f"  {col('·', 'cyan')} {msg}")
+def warn(msg: str): print(f"  {col('⚠', 'yellow')} {col(msg, 'yellow')}")
+def err(msg: str):  print(f"  {col('✖', 'red')} {col(msg, 'red')}")
+def flag(msg: str): print(f"  {col('⚑', 'magenta')} {col(msg, 'magenta')}")
 
-def warn(msg):
-    print(f"  {c('⚠', 'yellow')}  {c(msg, 'yellow')}")
+def risk_badge(level: str) -> str:
+    return {
+        "CRITICAL": col("CRITICAL", "red"),
+        "HIGH":     col("HIGH",     "red"),
+        "MEDIUM":   col("MEDIUM",   "yellow"),
+        "LOW":      col("LOW",      "green"),
+    }.get(level, col(level, "dim"))
 
-def err(msg):
-    print(f"  {c('✖', 'red')}  {c(msg, 'red')}")
+def priority_col(p: str) -> str:
+    p = str(p).strip()
+    if any(x in p for x in ("Critical", "Blocker")): return col(p, "red")
+    if "High"   in p: return col(p, "yellow")
+    if "Medium" in p: return col(p, "blue")
+    return col(p, "dim")
 
-# ──────────────────────────────────────────────
-# Banner
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# State management
+# ─────────────────────────────────────────────────────────────────
 
-def print_banner():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(c("""
-  +----------------------------------------------------------+
-  |        Kani-Store Engineering Agent                      |
-  |                                                          |
-  |   Jira Tracker * GitHub Monitor * Code Impact Analyzer   |
-  +----------------------------------------------------------+""", "cyan"))
-    print(c(f"  [{now}]  Project: {PROJECT_ROOT}", "dim"))
-    print()
-
-# ──────────────────────────────────────────────
-# State Management (detect changes between runs)
-# ──────────────────────────────────────────────
-
-def load_last_state():
+def load_last_state() -> dict:
     if os.path.exists(LAST_STATE_FILE):
         with open(LAST_STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -137,592 +225,606 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 def file_hash(path: str) -> str:
-    """MD5 hash of a file — used to detect changes."""
     if not os.path.exists(path):
         return ""
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
-# ──────────────────────────────────────────────
-# Jira Tracker (File-based prototype)
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# PILLAR 1 — Commit Analysis
+# ─────────────────────────────────────────────────────────────────
 
-def load_jira_state() -> dict:
-    """Load simulated Jira tickets from jira_state.json."""
-    if not os.path.exists(JIRA_STATE_FILE):
-        return {"tickets": []}
-    with open(JIRA_STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def analyze_jira_updates(last_state: dict) -> dict:
-    """
-    Compare current Jira state with last state.
-    Returns: dict with new tickets, status changes, comment additions.
-    """
-    current = load_jira_state()
-    last_tickets = {t["id"]: t for t in last_state.get("jira_tickets", [])}
-    current_tickets = {t["id"]: t for t in current.get("tickets", [])}
-
-    result = {
-        "new_tickets":         [],
-        "status_changes":      [],
-        "comment_additions":   [],
-        "description_updates": [],
-        "all_tickets":         current.get("tickets", []),
-        "has_changes":         False,
-    }
-
-    for tid, ticket in current_tickets.items():
-        if tid not in last_tickets:
-            result["new_tickets"].append(ticket)
-            result["has_changes"] = True
-        else:
-            prev = last_tickets[tid]
-            if ticket.get("status") != prev.get("status"):
-                result["status_changes"].append({
-                    "id":   tid,
-                    "from": prev.get("status"),
-                    "to":   ticket.get("status"),
-                    "title": ticket.get("title"),
-                })
-                result["has_changes"] = True
-            if ticket.get("description") != prev.get("description"):
-                result["description_updates"].append(ticket)
-                result["has_changes"] = True
-            prev_comments = len(prev.get("comments", []))
-            curr_comments = len(ticket.get("comments", []))
-            if curr_comments > prev_comments:
-                new_comments = ticket["comments"][prev_comments:]
-                result["comment_additions"].append({
-                    "id":       tid,
-                    "title":    ticket.get("title"),
-                    "comments": new_comments,
-                })
-                result["has_changes"] = True
-
-    return result
-
-def print_jira_summary(jira_result: dict):
-    """Print Jira Update Summary block."""
-    section("JIRA UPDATE SUMMARY", "🎫")
-
-    tickets = jira_result.get("all_tickets", [])
-    if not tickets:
-        warn("No Jira tickets found in jira_state.json")
-        print(f"  {c('→ Create', 'dim')} {c(JIRA_STATE_FILE, 'cyan')} {c('to simulate Jira tickets', 'dim')}")
-        return
-
-    if not jira_result.get("has_changes"):
-        status("No changes since last run", "✓", "green")
-
-    # New tickets
-    for t in jira_result.get("new_tickets", []):
-        print(f"\n  {c('NEW TICKET', 'green')}  {c(t['id'], 'cyan')} — {t['title']}")
-        print(f"    Priority: {_priority_color(t.get('priority','?'))}  |  Status: {c(t.get('status','?'), 'yellow')}")
-        if t.get("description"):
-            desc_short = t["description"][:120].replace("\n", " ")
-            print(f"    Desc: {c(desc_short + '...', 'dim')}")
-        _print_dev_impact(t)
-
-    # Status changes
-    for sc in jira_result.get("status_changes", []):
-        print(f"\n  {c('STATUS CHANGE', 'yellow')}  {c(sc['id'], 'cyan')} — {sc['title']}")
-        print(f"    {c(sc['from'], 'red')} → {c(sc['to'], 'green')}")
-
-    # Comment additions
-    for ca in jira_result.get("comment_additions", []):
-        print(f"\n  {c('NEW COMMENTS', 'blue')}  {c(ca['id'], 'cyan')} — {ca['title']}")
-        for cm in ca["comments"]:
-            body_short = cm.get("body", "")[:100].replace("\n", " ")
-            print(f"    [{cm.get('author','?')}]: {body_short}")
-
-    # Description updates
-    for du in jira_result.get("description_updates", []):
-        print(f"\n  {c('DESCRIPTION UPDATED', 'magenta')}  {c(du['id'], 'cyan')} — {du['title']}")
-
-    # Table of all tickets
-    print(f"\n  {c('All Active Tickets:', 'bold')}")
-    print(f"  {'ID':<12} {'Status':<14} {'Priority':<10} {'Title'}")
-    print(c("  " + "─" * 60, "dim"))
-    for t in tickets:
-        sid = c(f"{t.get('id','?'):<12}", "cyan")
-        sstatus = f"{t.get('status','?'):<14}"
-        sprint = _priority_color(f"{t.get('priority','?'):<10}")
-        print(f"  {sid}{sstatus}{sprint}{t.get('title','')[:40]}")
-
-def _priority_color(p: str) -> str:
-    p_str = str(p).strip()
-    if "Critical" in p_str or "Blocker" in p_str:
-        return c(p_str, "red")
-    elif "High" in p_str:
-        return c(p_str, "yellow")
-    elif "Medium" in p_str:
-        return c(p_str, "blue")
-    return c(p_str, "dim")
-
-def _print_dev_impact(ticket: dict):
-    """Infer dev impact from ticket data."""
-    title = ticket.get("title", "").lower()
-    affected = []
-    if any(k in title for k in ["product", "cart", "catalog", "price", "stock"]):
-        affected.append("constants.ts (PRODUCTS data)")
-    if any(k in title for k in ["ui", "component", "design", "layout", "page"]):
-        affected.append("App.tsx (UI components)")
-    if any(k in title for k in ["api", "gemini", "ai", "service"]):
-        affected.append("services/geminiService.ts")
-    if any(k in title for k in ["type", "interface", "model", "schema"]):
-        affected.append("types.ts")
-    if any(k in title for k in ["order", "checkout", "payment"]):
-        affected.extend(["App.tsx (order flow)", "types.ts (Order interface)"])
-    if affected:
-        print(f"    {c('→ Likely dev impact:', 'dim')} {', '.join(affected)}")
-
-# ──────────────────────────────────────────────
-# GitHub Monitor (File-based prototype)
-# ──────────────────────────────────────────────
-
-def load_github_state() -> dict:
-    """Load simulated GitHub commit history from github_state.json."""
-    if not os.path.exists(GITHUB_STATE_FILE):
-        return {"commits": [], "repo": "Kani-Store"}
-    with open(GITHUB_STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def get_real_git_log() -> list[dict]:
-    """Get actual git commits from the Kani-Store repo."""
+def git_run(args: list[str], cwd: str = PROJECT_ROOT) -> str:
+    """Run a git command and return stdout."""
     try:
-        result = subprocess.run(
-            ["git", "-C", PROJECT_ROOT, "log", "--oneline", "-10",
-             "--pretty=format:%H|%an|%ae|%ai|%s"],
-            capture_output=True, text=True, timeout=15
-        )
-        commits = []
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-                parts = line.split("|", 4)
-                if len(parts) == 5:
-                    commits.append({
-                        "hash":    parts[0][:8],
-                        "author":  parts[1],
-                        "email":   parts[2],
-                        "date":    parts[3][:19],
-                        "message": parts[4],
-                    })
-        return commits
-    except Exception:
-        return []
-
-def get_real_changed_files(commit_hash: str = None) -> list[dict]:
-    """Get files changed in the last commit or uncommitted changes."""
-    try:
-        if commit_hash:
-            cmd = ["git", "-C", PROJECT_ROOT, "diff-tree", "--no-commit-id",
-                   "-r", "--name-status", commit_hash]
-        else:
-            cmd = ["git", "-C", PROJECT_ROOT, "diff", "--name-status", "HEAD"]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        files = []
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-                parts = line.split("\t", 1)
-                if len(parts) == 2:
-                    status_map = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed"}
-                    files.append({
-                        "status": status_map.get(parts[0][0], "changed"),
-                        "path":   parts[1],
-                    })
-        return files
-    except Exception:
-        return []
-
-def analyze_github_updates(last_state: dict) -> dict:
-    """Detect new commits vs last run."""
-    real_commits = get_real_git_log()
-    simulated    = load_github_state()
-    sim_commits  = simulated.get("commits", [])
-
-    last_commit_hash = last_state.get("last_commit_hash", "")
-
-    # Determine latest commit
-    latest = None
-    new_commits = []
-
-    if real_commits:
-        latest = real_commits[0]
-        for rc in real_commits:
-            if rc["hash"] == last_commit_hash:
-                break
-            new_commits.append(rc)
-    elif sim_commits:
-        latest = sim_commits[0]
-        for sc in sim_commits:
-            if sc.get("hash", "") == last_commit_hash:
-                break
-            new_commits.append(sc)
-
-    # Get changed files for latest commit
-    changed_files = []
-    if real_commits:
-        changed_files = get_real_changed_files(real_commits[0]["hash"])
-    elif sim_commits and sim_commits[0].get("changed_files"):
-        changed_files = sim_commits[0]["changed_files"]
-
-    return {
-        "latest_commit":  latest,
-        "new_commits":    new_commits,
-        "changed_files":  changed_files,
-        "all_commits":    real_commits or sim_commits,
-        "has_changes":    len(new_commits) > 0,
-        "is_real_git":    bool(real_commits),
-    }
-
-def infer_jira_ticket(commit_msg: str, jira_tickets: list) -> str:
-    """Try to infer which Jira ticket a commit relates to."""
-    # Direct ticket ID in message (e.g., KS-123 or KANI-42)
-    match = re.search(r'\b([A-Z]+-\d+)\b', commit_msg)
-    if match:
-        return match.group(1)
-
-    # Keyword matching
-    msg_lower = commit_msg.lower()
-    for ticket in jira_tickets:
-        title_words = set(ticket.get("title", "").lower().split())
-        msg_words   = set(msg_lower.split())
-        overlap = title_words & msg_words
-        meaningful = {w for w in overlap if len(w) > 4}
-        if len(meaningful) >= 2:
-            return ticket.get("id", "")
-
-    return "Unknown (no ticket linked)"
-
-def print_github_summary(gh_result: dict, jira_tickets: list):
-    """Print Latest GitHub Commit Summary block."""
-    section("LATEST GITHUB COMMIT SUMMARY", "🐙")
-
-    latest = gh_result.get("latest_commit")
-    is_real = gh_result.get("is_real_git", False)
-
-    label = c("[Real Git]", "green") if is_real else c("[Simulated]", "yellow")
-    print(f"  Source: {label}")
-
-    if not latest:
-        warn("No commits found — check jira_state.json or ensure git is initialized")
-        return
-
-    if gh_result.get("has_changes"):
-        status(f"{len(gh_result['new_commits'])} new commit(s) since last run", "🆕", "green")
-    else:
-        status("No new commits since last run", "✓", "green")
-
-    # Latest commit card
-    print(f"\n  {c('Latest Commit:', 'bold')}")
-    print(f"  {'Hash':<10} {c(latest.get('hash', '?'), 'cyan')}")
-    print(f"  {'Author':<10} {latest.get('author', latest.get('name', '?'))}")
-    print(f"  {'Date':<10} {c(latest.get('date', '?'), 'dim')}")
-    print(f"  {'Message':<10} {c(latest.get('message', '?'), 'white')}")
-
-    ticket_ref = infer_jira_ticket(latest.get("message", ""), jira_tickets)
-    if ticket_ref and ticket_ref != "Unknown (no ticket linked)":
-        print(f"  {'→ Ticket':<10} {c(ticket_ref, 'cyan')}")
-    else:
-        print(f"  {'→ Ticket':<10} {c('No direct ticket link found', 'dim')}")
-
-    # Changed files
-    changed_files = gh_result.get("changed_files", [])
-    if changed_files:
-        print(f"\n  {c('Changed Files:', 'bold')}")
-        for f in changed_files[:15]:
-            icon = {"modified": "✏️", "added": "➕", "deleted": "🗑️"}.get(f["status"], "📄")
-            print(f"    {icon}  {f['path']}  {c(f['status'], 'dim')}")
-        if len(changed_files) > 15:
-            print(f"    … {len(changed_files) - 15} more files")
-
-    # Recent commit log
-    all_commits = gh_result.get("all_commits", [])
-    if len(all_commits) > 1:
-        print(f"\n  {c('Recent History:', 'bold')}")
-        for cm in all_commits[1:6]:
-            msg = cm.get("message", "")[:55]
-            h   = cm.get("hash", "?")
-            print(f"    {c(h, 'dim')}  {msg}")
-
-# ──────────────────────────────────────────────
-# Code Impact Analysis (Real git diff)
-# ──────────────────────────────────────────────
-
-def get_uncommitted_diff() -> str:
-    """Get the full diff of uncommitted changes in Kani-Store."""
-    try:
-        staged = subprocess.run(
-            ["git", "-C", PROJECT_ROOT, "diff", "--cached"],
-            capture_output=True, text=True, timeout=15
-        ).stdout
-        unstaged = subprocess.run(
-            ["git", "-C", PROJECT_ROOT, "diff"],
-            capture_output=True, text=True, timeout=15
-        ).stdout
-        return staged + "\n" + unstaged
+        r = subprocess.run(["git", "-C", cwd] + args,
+                           capture_output=True, text=True, timeout=20)
+        return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
 
-def get_changed_files_with_status() -> list[dict]:
-    """Get ALL changed files (uncommitted) in Kani-Store."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", PROJECT_ROOT, "status", "--porcelain"],
-            capture_output=True, text=True, timeout=15
-        )
-        files = []
-        for line in result.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            status_code = line[:2].strip()
-            filepath = line[3:].strip()
-            status_map = {
-                "M": "modified", "A": "added", "D": "deleted",
-                "R": "renamed", "?": "untracked", "MM": "modified",
-            }
-            files.append({
-                "path":   filepath,
-                "status": status_map.get(status_code[0], "changed"),
+def get_real_commits(n: int = 15) -> list[dict]:
+    raw = git_run(["log", f"-{n}", "--pretty=format:%H|%an|%ae|%ai|%s"])
+    commits = []
+    for line in raw.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("|", 4)
+        if len(parts) == 5:
+            commits.append({
+                "hash": parts[0][:10], "full_hash": parts[0],
+                "author": parts[1], "email": parts[2],
+                "date": parts[3][:19], "message": parts[4],
+                "source": "real",
             })
-        return files
-    except Exception:
-        return []
+    return commits
 
-def resolve_impact(changed_paths: list[str]) -> dict:
-    """
-    Compute blast radius for the Kani-Store dependency graph.
-    Returns impacted modules and risk level.
-    """
-    directly_changed  = set()
-    indirectly_impacted = set()
-    risk_score = 0
+def get_commit_diff(commit_hash: str) -> str:
+    """Get the full diff introduced by a commit."""
+    diff = git_run(["show", "--no-color", commit_hash])
+    return diff[:6000] if diff else ""
 
-    # Normalize paths (basename for matching)
-    for path in changed_paths:
-        basename = os.path.basename(path)
-        rel_path = path.replace("\\", "/")
-        # Match against known modules
-        for module, deps in KANI_MODULES.items():
-            if basename == os.path.basename(module) or rel_path.endswith(module):
-                directly_changed.add(module)
-                if module in CRITICAL_FILES:
-                    risk_score += 3
-                else:
-                    risk_score += 1
+def get_commit_files(commit_hash: str) -> list[dict]:
+    raw = git_run(["diff-tree", "--no-commit-id", "-r", "--name-status", commit_hash])
+    files = []
+    for line in raw.strip().split("\n"):
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            status_map = {"M": "modified", "A": "added", "D": "deleted",
+                          "R": "renamed", "C": "copied"}
+            files.append({"status": status_map.get(parts[0][0], "changed"),
+                          "path": parts[1]})
+    return files
 
-    # Propagate: find modules that depend ON the changed files
-    for changed_mod in list(directly_changed):
-        for module, deps in KANI_MODULES.items():
-            if module not in directly_changed:
-                for dep in deps:
-                    if dep == changed_mod or os.path.basename(dep) == os.path.basename(changed_mod):
-                        indirectly_impacted.add(module)
-                        risk_score += 0.5
+def get_uncommitted_diff() -> str:
+    staged   = git_run(["diff", "--cached"]) or ""
+    unstaged = git_run(["diff"]) or ""
+    return (staged + "\n" + unstaged).strip()
 
-    # Risk level
-    if risk_score >= 5:
-        risk = "HIGH"
-    elif risk_score >= 2:
-        risk = "MEDIUM"
-    else:
-        risk = "LOW"
+def get_uncommitted_files() -> list[dict]:
+    raw = git_run(["status", "--porcelain"]) or ""
+    files = []
+    for line in raw.strip().split("\n"):
+        if not line.strip():
+            continue
+        code = line[:2].strip()
+        path = line[3:].strip()
+        sm = {"M": "modified", "A": "added", "D": "deleted",
+              "R": "renamed", "?": "untracked"}
+        files.append({"path": path, "status": sm.get(code[0] if code else "?", "changed")})
+    return files
+
+def infer_ticket_id(msg: str, tickets: list[dict]) -> str:
+    m = re.search(r'\b([A-Z]+-\d+)\b', msg)
+    if m:
+        return m.group(1)
+    msg_lower = msg.lower()
+    for t in tickets:
+        words = set(t.get("title", "").lower().split())
+        overlap = {w for w in words if len(w) > 4 and w in msg_lower}
+        if len(overlap) >= 2:
+            return t["id"]
+    return ""
+
+def detect_breaking_changes(diff_text: str) -> list[dict]:
+    """Scan diff for patterns that indicate breaking changes."""
+    findings = []
+    for pattern, label, guidance in BREAKING_PATTERNS:
+        matches = re.findall(pattern, diff_text, re.MULTILINE | re.IGNORECASE)
+        if matches:
+            match_examples = [str(m) for m in matches[:3]]
+            findings.append({
+                "pattern": label,
+                "guidance": guidance,
+                "examples": match_examples,
+            })
+    return findings
+
+def score_commit_health(commit: dict, diff_text: str,
+                        changed_files: list[dict],
+                        tickets: list[dict]) -> dict:
+    """Score a commit 0-100; return grade, issues, and breaking change list."""
+    issues: list[str] = []
+    score = 100
+
+    ticket_id = infer_ticket_id(commit.get("message", ""), tickets)
+    if not ticket_id:
+        issues.append("No Jira ticket linked in commit message")
+        score -= 20
+    commit["_ticket_id"] = ticket_id
+
+    breaking = detect_breaking_changes(diff_text)
+    for b in breaking:
+        if "credential" in b["pattern"].lower():
+            issues.append(f"SECURITY — {b['pattern']}: {b['guidance']}")
+            score -= 30
+        else:
+            issues.append(f"Breaking change — {b['pattern']}: {b['guidance']}")
+            score -= 15
+
+    paths = [f["path"] for f in changed_files]
+    if any("App.tsx" in p for p in paths) and not any("types.ts" in p for p in paths):
+        issues.append("App.tsx modified but types.ts unchanged — verify no new types needed")
+        score -= 5
+
+    if any("types.ts" in p for p in paths) and not any("constants.ts" in p for p in paths):
+        issues.append("types.ts changed but constants.ts not updated — mock data may be stale")
+        score -= 5
+
+    if any("package.json" in p for p in paths) and not any(
+            "package-lock" in p or "yarn.lock" in p for p in paths):
+        issues.append("package.json changed but no lock-file update — run npm install")
+        score -= 10
+
+    lines = diff_text.count("\n")
+    if lines > 400:
+        issues.append(f"Very large diff ({lines} lines) — consider splitting commits")
+        score -= 10
+
+    score = max(0, score)
+    grade = ("A" if score >= 85 else "B" if score >= 70 else
+             "C" if score >= 50 else "D" if score >= 30 else "F")
+
+    return {"score": score, "grade": grade, "issues": issues,
+            "breaking": breaking, "ticket_id": ticket_id}
+
+def analyze_commits(target_hash: str | None, tickets: list[dict]) -> dict:
+    """Analyze recent commits (or one specific commit) for health + breaking changes."""
+    real_commits = get_real_commits(10)
+    sim_state    = _load_json(GITHUB_STATE_FILE)
+    sim_commits  = sim_state.get("commits", [])
+
+    commits = real_commits if real_commits else sim_commits
+    if not commits:
+        return {"commits": [], "has_real_git": False, "summary": "No commits found"}
+
+    results = []
+    for i, cm in enumerate(commits[:6]):
+        h = cm.get("full_hash") or cm.get("hash", "")
+        if target_hash and not h.startswith(target_hash):
+            continue
+
+        if real_commits:
+            diff_text = get_commit_diff(h)
+            changed   = get_commit_files(h)
+        else:
+            diff_text = cm.get("diff", "")
+            changed   = cm.get("changed_files", [])
+
+        health      = score_commit_health(cm, diff_text, changed, tickets)
+        prev_commit = commits[i + 1] if i + 1 < len(commits) else None
+
+        results.append({
+            "commit": cm, "diff_text": diff_text,
+            "changed_files": changed, "health": health,
+            "prev_commit": prev_commit, "index": i,
+        })
+
+    return {"commits": results, "has_real_git": bool(real_commits),
+            "total_analyzed": len(results)}
+
+def print_commit_analysis(data: dict):
+    section("COMMIT ANALYSIS  —  Health Scores & Breaking Changes", ">>")
+    src = col("[Real Git]", "green") if data.get("has_real_git") else col("[Simulated]", "yellow")
+    info(f"Source: {src}  |  Analyzed: {data.get('total_analyzed', 0)} commits")
+
+    for item in data.get("commits", []):
+        cm     = item["commit"]
+        health = item["health"]
+        score  = health["score"]
+        grade  = health["grade"]
+        grade_col = ("green" if grade == "A" else
+                     "cyan"  if grade == "B" else
+                     "yellow" if grade == "C" else "red")
+
+        print(f"\n  {'─'*58}")
+        print(f"  {col(cm.get('hash','?'), 'cyan')}  {cm.get('date','')}")
+        msg = cm.get("message", "")[:72]
+        print(f"  {col(msg, 'white')}")
+        print(f"  Author: {cm.get('author','?')}  |  "
+              f"Score: {col(str(score), grade_col)}/100  Grade: {col(grade, grade_col)}")
+
+        tid = health.get("ticket_id")
+        if tid:
+            print(f"  Jira: {col(tid, 'cyan')}")
+        else:
+            warn("No Jira ticket linked")
+
+        cf = item.get("changed_files", [])
+        if cf:
+            icons = {"modified": "~", "added": "+", "deleted": "-", "renamed": ">"}
+            for f in cf[:8]:
+                ic   = icons.get(f["status"], ".")
+                crit = col(" [CRITICAL]", "red") if os.path.basename(f["path"]) in CRITICAL_FILES else ""
+                print(f"    {ic} {f['path']}{crit}")
+            if len(cf) > 8:
+                print(f"    ... {len(cf)-8} more files")
+
+        for b in health.get("breaking", []):
+            print(f"\n  {col('[BREAKING]', 'red')} {b['pattern']}")
+            print(f"    Guidance : {b['guidance']}")
+            if b.get("examples"):
+                print(f"    Examples : {', '.join(str(x) for x in b['examples'][:2])}")
+
+        for issue in health.get("issues", []):
+            if issue.startswith("SECURITY"):
+                err(issue)
+            else:
+                warn(issue)
+
+        prev = item.get("prev_commit")
+        if prev and health.get("breaking"):
+            print(f"\n  {col('Compared to previous commit:', 'bold')}")
+            print(f"    Prev: {col(prev.get('hash','?'),'dim')}  {prev.get('message','?')[:55]}")
+            print(f"    {col('-> This commit introduced a regression vs previous commit.', 'red')}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# PILLAR 2 — Jira Completeness Checker
+# ─────────────────────────────────────────────────────────────────
+
+def _load_json(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def load_jira_tickets() -> list[dict]:
+    return _load_json(JIRA_STATE_FILE).get("tickets", [])
+
+def expected_files_for_ticket(ticket: dict) -> list[tuple[str, str]]:
+    """Return (filename, reason) pairs that SHOULD be modified for this ticket."""
+    text = " ".join([
+        ticket.get("title", ""),
+        ticket.get("description", ""),
+        " ".join(ticket.get("labels", [])),
+    ]).lower()
+
+    required: dict[str, str] = {}
+    for keywords, files, reason in TICKET_KEYWORD_LAYERS:
+        if any(kw in text for kw in keywords):
+            for f in files:
+                if f not in required:
+                    required[f] = reason
+    return list(required.items())
+
+def get_commits_for_ticket(ticket_id: str, commits: list[dict]) -> list[dict]:
+    pattern = re.compile(r'\b' + re.escape(ticket_id) + r'\b', re.IGNORECASE)
+    return [c for c in commits if pattern.search(c.get("message", ""))]
+
+def check_ticket_completeness(ticket: dict, all_commits: list[dict]) -> dict:
+    tid      = ticket["id"]
+    expected = expected_files_for_ticket(ticket)
+    linked   = get_commits_for_ticket(tid, all_commits)
+
+    changed_paths: set[str] = set()
+    for c in linked:
+        for f in c.get("changed_files", []):
+            changed_paths.add(os.path.basename(f["path"]))
+
+    present, missing = [], []
+    for fname, reason in expected:
+        base = os.path.basename(fname)
+        if base in changed_paths or fname in changed_paths:
+            present.append((fname, reason))
+        else:
+            missing.append((fname, reason))
+
+    total = len(expected)
+    pct   = int(100 * len(present) / total) if total else 100
+
+    status_label = ticket.get("status", "?")
+    is_closed    = status_label.lower() in ("done", "closed", "resolved")
+
+    risk = ("HIGH" if missing and is_closed else
+            "MEDIUM" if missing else "LOW")
 
     return {
-        "directly_changed":     list(directly_changed),
-        "indirectly_impacted":  list(indirectly_impacted),
-        "risk_level":           risk,
-        "risk_score":           round(risk_score, 1),
+        "ticket": ticket, "expected": expected,
+        "present": present, "missing": missing,
+        "linked_commits": linked, "completeness_pct": pct,
+        "risk": risk, "is_closed": is_closed,
     }
 
-def parse_diff_for_functions(diff_text: str) -> list[str]:
-    """Extract function/component names from a diff."""
-    patterns = [
-        r"^[+\-].*(?:const|function|class|export)\s+(\w+)",
-        r"^[+\-].*(\w+)\s*=\s*(?:\(|async)",
-        r"^[+\-].*(?:interface|type)\s+(\w+)",
-    ]
-    found = set()
-    for line in diff_text.split("\n"):
-        for pat in patterns:
-            m = re.search(pat, line)
-            if m:
-                name = m.group(1)
-                if len(name) > 2 and not name.startswith("_"):
-                    found.add(name)
-    return list(found)[:20]
+def analyze_jira_completeness(all_commits: list[dict]) -> list[dict]:
+    return [check_ticket_completeness(t, all_commits) for t in load_jira_tickets()]
 
-def analyze_code_impact() -> dict:
-    """Full code impact analysis on Kani-Store uncommitted changes."""
-    changed_files = get_changed_files_with_status()
-    diff_text     = get_uncommitted_diff()
-
-    if not changed_files and not diff_text.strip():
-        return {
-            "has_changes":    False,
-            "changed_files":  [],
-            "impact":         {},
-            "diff_summary":   "",
-            "functions_changed": [],
-        }
-
-    changed_paths = [f["path"] for f in changed_files]
-    impact        = resolve_impact(changed_paths)
-    funcs         = parse_diff_for_functions(diff_text)
-
-    # Build a short diff summary (first 2000 chars)
-    diff_summary = ""
-    if diff_text.strip():
-        lines = diff_text.strip().split("\n")
-        added   = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
-        diff_summary = f"+{added} lines added, -{removed} lines removed"
-
-    return {
-        "has_changes":       len(changed_files) > 0,
-        "changed_files":     changed_files,
-        "impact":            impact,
-        "diff_summary":      diff_summary,
-        "functions_changed": funcs,
-        "diff_text":         diff_text[:3000] if diff_text else "",
-    }
-
-def print_code_impact(code_result: dict, jira_tickets: list):
-    """Print Code Change Impact Analysis block."""
-    section("CODE CHANGE IMPACT ANALYSIS", "⚡")
-
-    if not code_result.get("has_changes"):
-        status("No uncommitted changes detected in Kani-Store", "✓", "green")
+def print_jira_completeness(results: list[dict]):
+    section("JIRA COMPLETENESS CHECK", ">>")
+    if not results:
+        warn("No tickets found in jira_state.json")
         return
 
-    changed = code_result.get("changed_files", [])
-    impact  = code_result.get("impact", {})
-    risk    = impact.get("risk_level", "UNKNOWN")
+    print(f"\n  {'ID':<10} {'Status':<14} {'Priority':<12} {'Done':<8} {'Risk':<8} Title")
+    print(col("  " + "-" * 70, "dim"))
+    for r in results:
+        t   = r["ticket"]
+        pct = r["completeness_pct"]
+        pct_col = "green" if pct == 100 else "yellow" if pct >= 50 else "red"
+        risk_c  = "red" if r["risk"] == "HIGH" else "yellow" if r["risk"] == "MEDIUM" else "green"
+        print(f"  {col(t['id'],'cyan'):<19} {t.get('status','?'):<14} "
+              f"{priority_col(t.get('priority','?')):<21} "
+              f"{col(str(pct)+'%', pct_col):<19} "
+              f"{col(r['risk'], risk_c):<19} "
+              f"{t.get('title','')[:38]}")
 
-    # Risk badge
-    risk_display = {
-        "HIGH":   c("🔴  HIGH RISK", "red"),
-        "MEDIUM": c("🟡  MEDIUM RISK", "yellow"),
-        "LOW":    c("🟢  LOW RISK", "green"),
-    }.get(risk, c(risk, "dim"))
+    for r in results:
+        t       = r["ticket"]
+        missing = r["missing"]
+        linked  = r["linked_commits"]
+        if not missing and r["linked_commits"]:
+            continue
 
-    _score = impact.get("risk_score", 0)
-    print(f"\n  Risk Level: {risk_display}  {c(f'(score: {_score})', 'dim')}")
-    print(f"  Diff:       {c(code_result.get('diff_summary', 'N/A'), 'dim')}")
+        print(f"\n  {'─'*58}")
+        print(f"  {col(t['id'], 'cyan')} — {t['title']}")
+        print(f"  Status: {t.get('status','?')}  Priority: {priority_col(t.get('priority','?'))}  "
+              f"Completeness: {r['completeness_pct']}%")
 
-    # What changed
-    print(f"\n  {c('What Changed:', 'bold')}")
-    for f in changed[:20]:
-        icon = {"modified": "✏️", "added": "➕", "deleted": "🗑️", "untracked": "🆕"}.get(f["status"], "📄")
-        is_crit = os.path.basename(f["path"]) in {os.path.basename(k) for k in CRITICAL_FILES}
-        marker = c(" ← CRITICAL FILE", "red") if is_crit else ""
-        print(f"    {icon}  {f['path']}{marker}")
+        if linked:
+            print(f"\n  Linked commits ({len(linked)}):")
+            for c in linked[:4]:
+                print(f"    {col(c.get('hash','?'),'dim')}  {c.get('message','?')[:60]}")
+        else:
+            warn(f"No commits linked to {t['id']} — add ticket ID to commit messages")
 
-    # Functions changed
-    funcs = code_result.get("functions_changed", [])
-    if funcs:
-        print(f"\n  {c('Functions/Components Modified:', 'bold')}")
-        for fn in funcs:
-            print(f"    • {c(fn, 'cyan')}")
+        if r["present"]:
+            print(f"\n  {col('Changed correctly:', 'green')}")
+            for fname, _ in r["present"]:
+                print(f"    {col('[OK]', 'green')} {fname}")
 
-    # Impact propagation
-    print(f"\n  {c('Affected Modules:', 'bold')}")
-    for m in impact.get("directly_changed", []):
-        print(f"    {c('● Direct', 'red')}      {m}")
-    for m in impact.get("indirectly_impacted", []):
-        print(f"    {c('○ Indirect', 'yellow')}    {m}")
+        if missing:
+            print(f"\n  {col('MISSING changes:', 'red')}")
+            for fname, reason in missing:
+                print(f"    {col('[X]', 'red')} {fname}")
+                print(f"      Reason: {col(reason, 'dim')}")
+            if r["is_closed"]:
+                flag(f"{t['id']} is CLOSED but missing code changes — may cause prod issues!")
+            else:
+                warn(f"{len(missing)} file(s) still need changes for {t['id']} to be complete")
 
-    # Reason why it matters
-    print(f"\n  {c('Why It Matters:', 'bold')}")
-    _explain_impact(impact, changed)
+        desc = t.get("description", "")
+        if desc:
+            print(f"\n  {col('Brief:', 'dim')} {desc[:160].replace(chr(10),' ')}")
 
-def _explain_impact(impact: dict, changed_files: list):
-    """Generate human-readable impact explanation."""
-    direct = impact.get("directly_changed", [])
-    indirect = impact.get("indirectly_impacted", [])
 
-    explanations = {
-        "App.tsx":           "Core UI — all pages, routing, and state management live here. Any change affects the entire frontend.",
-        "types.ts":          "Shared type definitions — changes here can break ALL modules that import these interfaces.",
-        "constants.ts":      "Product catalog and mock data — changes affect product listings, cart, and orders.",
-        "services/geminiService.ts": "AI/Gemini integration — changes affect chatbot and AI-powered features.",
-        "components/Icons.tsx": "Shared icon components — changes affect UI rendering across pages.",
-        "index.tsx":         "App entry point — only impacts initial render.",
-        "vite.config.ts":    "Build config — affects bundling, dev server, and production builds.",
-        "package.json":      "Dependencies — can break builds or introduce security issues.",
+# ─────────────────────────────────────────────────────────────────
+# PILLAR 3 — Ripple Effect Engine
+# ─────────────────────────────────────────────────────────────────
+
+def resolve_blast_radius(changed_paths: list[str]) -> dict:
+    """Compute full cross-layer ripple propagation for changed files."""
+    directly: set[str] = set()
+    for path in changed_paths:
+        bn = os.path.basename(path)
+        for mod in KANI_DEPS:
+            if bn == os.path.basename(mod) or path.replace("\\", "/").endswith(mod):
+                directly.add(mod)
+
+    indirect: set[str] = set()
+    queue = list(directly)
+    while queue:
+        current = queue.pop()
+        for mod, deps in KANI_DEPS.items():
+            if mod not in directly and mod not in indirect:
+                dep_bases = {os.path.basename(d) for d in deps}
+                if os.path.basename(current) in dep_bases:
+                    indirect.add(mod)
+                    queue.append(mod)
+
+    def get_layer(fname: str) -> str:
+        bn = os.path.basename(fname)
+        for lid, files in LAYERS.items():
+            if any(os.path.basename(f) == bn or fname == f for f in files):
+                return lid
+        return "UNKNOWN"
+
+    score = sum(4 if m in CRITICAL_FILES else 1 for m in directly) + \
+            sum(2 if m in CRITICAL_FILES else 0.5 for m in indirect)
+    risk  = ("CRITICAL" if score >= 10 else "HIGH" if score >= 5 else
+             "MEDIUM" if score >= 2 else "LOW")
+
+    return {
+        "directly":  sorted(directly),
+        "indirect":  sorted(indirect),
+        "all":       sorted(directly | indirect),
+        "risk":      risk,
+        "score":     round(score, 1),
+        "layer_map": {m: get_layer(m) for m in directly | indirect},
+        "unchanged_but_warn": _warn_unchanged(directly, indirect),
     }
 
-    for mod in direct:
-        if mod in explanations:
-            print(f"    {c('→', 'red')} {c(mod, 'cyan')}: {explanations[mod]}")
+def _warn_unchanged(directly: set[str], indirect: set[str]) -> list[str]:
+    warnings = []
+    if "types.ts" in directly:
+        suspects = [m for m in KANI_DEPS
+                    if m not in directly and m not in indirect and m not in ("index.html",)]
+        if suspects:
+            warnings.append(f"types.ts changed — also verify: {', '.join(suspects[:4])}")
+    if "constants.ts" in directly and "App.tsx" not in directly:
+        warnings.append("constants.ts changed — verify App.tsx renders new data correctly")
+    return warnings
 
-    for mod in indirect:
-        if mod in explanations:
-            print(f"    {c('→', 'yellow')} {c(mod, 'cyan')}: Indirectly affected because it imports from changed modules.")
+def print_ripple_effect(blast: dict, changed_paths: list[str]):
+    section("RIPPLE EFFECT  —  Cross-Layer Impact Map", ">>")
+    score_str = f"(score: {blast['score']})"
+    print(f"\n  Overall Risk: {risk_badge(blast['risk'])}  {col(score_str, 'dim')}")
+    print(f"  Files changed: {len(changed_paths)}")
 
-# ──────────────────────────────────────────────
-# Recommendations
-# ──────────────────────────────────────────────
+    print(f"\n  {col('Layer propagation:', 'bold')}")
+    layer_buckets: dict[str, list[str]] = {}
+    for mod, lid in blast["layer_map"].items():
+        layer_buckets.setdefault(lid, []).append(mod)
 
-def print_recommendations(jira_result: dict, gh_result: dict, code_result: dict):
-    """Print unified recommendations based on all 3 analyses."""
-    section("RECOMMENDATIONS", "💡")
+    for lid in ["L1_UI", "L2_TYPES", "L3_DATA", "L4_SERVICES", "L5_CONFIG", "UNKNOWN"]:
+        mods = layer_buckets.get(lid, [])
+        if not mods:
+            continue
+        label = LAYER_LABELS.get(lid, lid)
+        print(f"\n  {col(label, 'bold')}")
+        for mod in mods:
+            is_direct = mod in blast["directly"]
+            tag  = col("[DIRECT]", "red")  if is_direct else col("[Impact]", "yellow")
+            crit = col(" [CRITICAL]", "red") if mod in CRITICAL_FILES else ""
+            print(f"    {tag}  {mod}{crit}")
 
-    recs = []
-    impact = code_result.get("impact", {})
-    risk   = impact.get("risk_level", "LOW")
+    if blast.get("unchanged_but_warn"):
+        print(f"\n  {col('Cross-layer warnings:', 'bold')}")
+        for w in blast["unchanged_but_warn"]:
+            warn(w)
 
-    # Code-based recommendations
-    if code_result.get("has_changes"):
-        if risk == "HIGH":
-            recs.append(("🔴", "HIGH RISK change detected — run full test suite before committing"))
-            recs.append(("🔴", "Check all pages in browser: Home, Cart, Orders, Profile, Admin"))
-        if "types.ts" in impact.get("directly_changed", []):
-            recs.append(("⚠️", "types.ts changed — verify CartItem, Product, Order interfaces are backward-compatible"))
-        if "constants.ts" in impact.get("directly_changed", []):
-            recs.append(("⚠️", "constants.ts changed — check PRODUCTS array for required fields (id, name, price, stock)"))
-        if "services/geminiService.ts" in impact.get("directly_changed", []):
-            recs.append(("🤖", "geminiService.ts changed — test Gemini AI chat feature end-to-end"))
-        if "App.tsx" in impact.get("directly_changed", []):
-            recs.append(("🖥️", "App.tsx changed — test navigation, state management, and all route transitions"))
+    if blast["directly"] and blast["indirect"]:
+        print(f"\n  {col('Propagation path:', 'bold')}")
+        for mod in blast["directly"][:3]:
+            dependents = [m for m, deps in KANI_DEPS.items()
+                          if os.path.basename(mod) in {os.path.basename(d) for d in deps}]
+            if dependents:
+                print(f"    {col(mod,'cyan')} -> {' -> '.join(dependents[:4])}")
 
-    # Jira-based recommendations
-    for t in jira_result.get("new_tickets", []):
-        priority = t.get("priority", "").lower()
-        if priority in ("critical", "blocker", "high"):
-            recs.append(("🎫", f"HIGH-PRIORITY Jira ticket {t['id']}: '{t['title'][:50]}' — needs immediate attention"))
 
-    for sc in jira_result.get("status_changes", []):
-        if sc.get("to", "").lower() in ("in review", "done", "closed"):
-            recs.append(("✅", f"{sc['id']} moved to '{sc['to']}' — ensure PR/code is linked"))
+# ─────────────────────────────────────────────────────────────────
+# PILLAR 4 — Failure Insight Reporter
+# ─────────────────────────────────────────────────────────────────
 
-    # GitHub-based recommendations
-    if gh_result.get("has_changes"):
-        recs.append(("🔄", "New commits detected — sync your local branch: git pull"))
+def generate_recommendations(commit_data: dict,
+                              jira_results: list[dict],
+                              blast: dict,
+                              changed_paths: list[str]) -> list[tuple[str, str, str]]:
+    """Return sorted (priority, icon, message) recommendations."""
+    recs: list[tuple[str, str, str]] = []
 
-    # Generic best practices
+    for item in commit_data.get("commits", []):
+        h = item["health"]
+        for b in h.get("breaking", []):
+            if "credential" in b["pattern"].lower():
+                recs.append(("CRITICAL", "[SEC]",
+                              f"SECURITY: {b['pattern']} — {b['guidance']}"))
+            else:
+                recs.append(("HIGH", "[!]",
+                              f"Breaking change in {item['commit'].get('hash','?')}: "
+                              f"{b['pattern']} — {b['guidance']}"))
+        for issue in h.get("issues", []):
+            recs.append(("HIGH" if "SECURITY" in issue else "MEDIUM", "[warn]", issue))
+
+    for r in jira_results:
+        t = r["ticket"]
+        if r["missing"] and r["is_closed"]:
+            recs.append(("CRITICAL", "[JIRA]",
+                         f"{t['id']} '{t['title'][:50]}' CLOSED but missing: "
+                         f"{', '.join(f for f,_ in r['missing'][:3])} — prod risk!"))
+        elif r["missing"]:
+            recs.append(("HIGH", "[JIRA]",
+                         f"{t['id']} incomplete ({r['completeness_pct']}%): "
+                         f"missing {', '.join(f for f,_ in r['missing'][:3])}"))
+        if not r["linked_commits"] and t.get("status", "To Do") not in ("To Do",):
+            recs.append(("MEDIUM", "[link]",
+                         f"{t['id']} has no linked commits — add ID to commit messages"))
+
+    if blast.get("risk") in ("HIGH", "CRITICAL"):
+        recs.append(("HIGH", "[!]",
+                     f"HIGH RISK blast radius (score {blast.get('score')}) — "
+                     f"run full regression suite before merging"))
+    for w in blast.get("unchanged_but_warn", []):
+        recs.append(("MEDIUM", "[warn]", w))
+
+    bn = {os.path.basename(p) for p in changed_paths}
+    if "types.ts" in bn:
+        recs.append(("HIGH", "[TS]",
+                     "types.ts changed — check ALL importing files for compile errors"))
+    if "App.tsx" in bn:
+        recs.append(("MEDIUM", "[UI]",
+                     "App.tsx changed — test all routes: Home, Products, Cart, Orders, Admin"))
+    if "geminiService.ts" in bn:
+        recs.append(("MEDIUM", "[AI]",
+                     "geminiService.ts changed — test Gemini chatbot end-to-end"))
+    if "package.json" in bn:
+        recs.append(("MEDIUM", "[PKG]",
+                     "package.json changed — run `npm install` and `npm run build`"))
+
     if not recs:
-        recs.append(("✅", "Everything looks good — no critical changes detected"))
-        recs.append(("💡", "Run 'npm run dev' to verify the app starts correctly"))
+        recs.append(("LOW", "[OK]", "No critical issues detected — good to merge"))
 
-    recs.append(("📝", "After changes, update jira_state.json to mark tickets In Progress"))
-    recs.append(("🧪", "Test checklist: Product listing → Add to cart → Checkout → Orders page"))
+    recs.append(("LOW", "[test]",
+                 "Test checklist: Product listing -> Add to cart -> Checkout -> Orders page"))
 
-    for icon, text in recs:
-        print(f"  {icon}  {text}")
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    recs.sort(key=lambda x: order.get(x[0], 9))
+    return recs
 
-# ──────────────────────────────────────────────
-# Ollama AI Deep Analysis (optional)
-# ──────────────────────────────────────────────
+def print_failure_insight(commit_data: dict, jira_results: list[dict],
+                          blast: dict, changed_paths: list[str]):
+    section("FAILURE INSIGHT  &  CORRECTIVE ACTIONS", ">>")
+    recs = generate_recommendations(commit_data, jira_results, blast, changed_paths)
 
-def check_ollama() -> bool:
-    """Check if Ollama is running."""
+    last_priority = None
+    for priority, icon, msg in recs:
+        if priority != last_priority:
+            print(f"\n  {col(priority, 'bold' if priority in ('CRITICAL','HIGH') else 'dim')}")
+            last_priority = priority
+        c_fn = ("red"    if priority == "CRITICAL" else
+                "yellow" if priority == "HIGH" else
+                "cyan"   if priority == "MEDIUM" else "dim")
+        print(f"  {icon}  {col(msg, c_fn)}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Jira change tracker (between runs)
+# ─────────────────────────────────────────────────────────────────
+
+def analyze_jira_changes(last_state: dict) -> dict:
+    tickets  = load_jira_tickets()
+    last_map = {t["id"]: t for t in last_state.get("jira_tickets", [])}
+
+    new_t, status_c, comment_a, desc_u = [], [], [], []
+    for t in tickets:
+        tid = t["id"]
+        if tid not in last_map:
+            new_t.append(t)
+        else:
+            prev = last_map[tid]
+            if t.get("status") != prev.get("status"):
+                status_c.append({"id": tid, "title": t["title"],
+                                  "from": prev.get("status"), "to": t.get("status")})
+            if t.get("description") != prev.get("description"):
+                desc_u.append(t)
+            if len(t.get("comments", [])) > len(prev.get("comments", [])):
+                comment_a.append({"id": tid, "title": t["title"],
+                                   "new": t["comments"][len(prev.get("comments", [])):]})
+
+    return {"new": new_t, "status": status_c, "comments": comment_a,
+            "desc": desc_u, "all": tickets,
+            "changed": bool(new_t or status_c or comment_a or desc_u)}
+
+def print_jira_summary(jd: dict):
+    section("JIRA TICKET TRACKER  (change detection)", ">>")
+    if not jd["all"]:
+        warn("No tickets in jira_state.json")
+        return
+    if not jd["changed"]:
+        ok("No Jira changes since last run")
+
+    for t in jd.get("new", []):
+        print(f"\n  {col('NEW', 'green')} {col(t['id'],'cyan')} — {t['title']}")
+        print(f"    {priority_col(t.get('priority','?'))}  {t.get('status','?')}")
+    for sc in jd.get("status", []):
+        print(f"\n  {col('STATUS CHANGE', 'yellow')} {col(sc['id'],'cyan')} — {sc['title']}")
+        print(f"    {col(sc['from'],'red')} -> {col(sc['to'],'green')}")
+    for ca in jd.get("comments", []):
+        print(f"\n  {col('NEW COMMENT', 'blue')} {col(ca['id'],'cyan')} — {ca['title']}")
+        for cm in ca["new"][:2]:
+            print(f"    {cm.get('author','?')}: {cm.get('body','')[:100]}")
+
+    print(f"\n  {'ID':<10} {'Status':<14} {'Priority':<12} Title")
+    print(col("  " + "-" * 62, "dim"))
+    for t in jd["all"]:
+        print(f"  {col(t['id'],'cyan'):<19} {t.get('status','?'):<14} "
+              f"{priority_col(t.get('priority','?')):<21} {t.get('title','')[:40]}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Ollama AI deep analysis
+# ─────────────────────────────────────────────────────────────────
+
+def ollama_alive() -> bool:
     try:
         import urllib.request
         r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3)
@@ -730,245 +832,243 @@ def check_ollama() -> bool:
     except Exception:
         return False
 
-def run_ai_analysis(code_result: dict, jira_result: dict, gh_result: dict):
-    """Run deep AI analysis via Ollama if available."""
-    section("AI DEEP ANALYSIS (Ollama)", "🤖")
-
-    if not check_ollama():
-        warn("Ollama not running — skipping AI analysis")
-        print(f"  {c('→ To enable:', 'dim')} ollama serve  (then: ollama pull mistral)")
+def run_ai_analysis(diff_text: str, jira_results: list[dict],
+                    commit_data: dict, blast: dict, model: str = DEFAULT_MODEL):
+    section("AI DEEP ANALYSIS  (Ollama)", ">>")
+    if not ollama_alive():
+        warn("Ollama not running — skipping.  Start with: ollama serve")
         return
 
-    # Build diff context
-    diff = code_result.get("diff_text", "")[:2000] or "(no uncommitted changes)"
-    changed_files = [f["path"] for f in code_result.get("changed_files", [])]
+    jira_ctx = ""
+    for r in jira_results[:4]:
+        t = r["ticket"]
+        missing_str = ", ".join(f for f, _ in r["missing"][:3]) or "none"
+        jira_ctx += (f"  {t['id']} [{t['status']}] {t['title']}\n"
+                     f"    Missing changes: {missing_str}\n")
 
-    jira_context = ""
-    for t in jira_result.get("all_tickets", [])[:3]:
-        jira_context += f"  - {t['id']}: {t['title']} [{t.get('status','')}]\n"
+    recent_commits = "\n".join(
+        f"  {i['commit'].get('hash','?')} (grade {i['health']['grade']}) — "
+        f"{i['commit'].get('message','?')[:80]}"
+        for i in commit_data.get("commits", [])[:3]
+    ) or "(none)"
 
-    commit = gh_result.get("latest_commit") or {}
-    commit_context = f"{commit.get('hash','?')} — {commit.get('message','?')}"
+    prompt = f"""You are a senior engineer reviewing the Kani-Store e-commerce project.
+Stack: React + TypeScript (App.tsx, types.ts, constants.ts, services/geminiService.ts).
 
-    prompt = f"""You are an AI engineering assistant for a React/TypeScript e-commerce project called Kani-Store.
+RECENT COMMITS:
+{recent_commits}
 
-Project structure:
-- App.tsx (main UI, 71KB — contains ALL pages: Home, Products, Cart, Orders, Profile, Admin)
-- types.ts (shared interfaces: Product, CartItem, Order, Address, ChatMessage)
-- constants.ts (PRODUCTS array, CATEGORIES, mock data)
-- services/geminiService.ts (Gemini AI integration)
-- components/Icons.tsx (SVG icons)
+JIRA TICKETS & COMPLETENESS:
+{jira_ctx or '(none)'}
 
-Current Jira tickets:
-{jira_context or "  (none)"}
+BLAST RADIUS:
+Risk: {blast.get('risk','?')}  Score: {blast.get('score',0)}
+Directly changed: {', '.join(blast.get('directly',[])[:6]) or 'none'}
+Indirectly impacted: {', '.join(blast.get('indirect',[])[:6]) or 'none'}
 
-Latest GitHub commit:
-  {commit_context}
+DIFF EXCERPT (latest commit):
+{diff_text[:2500] or '(no uncommitted changes)'}
 
-Uncommitted code changes:
-  Files: {', '.join(changed_files) if changed_files else 'none'}
-  Diff (excerpt):
-{diff}
+Provide a concise engineering review with EXACTLY these four sections:
 
-Please provide a concise analysis in EXACTLY this format:
+ROOT CAUSE ANALYSIS:
+  (What is the core issue / intent of these changes?)
 
-What Changed:
-  → [specific description]
+BREAKING CHANGE RISK:
+  (Specific risks introduced and which files will fail)
 
-Root Cause / Purpose:
-  → [why this change exists]
+MISSING IMPLEMENTATIONS:
+  (Which Jira tickets are NOT fully implemented and what exactly is missing)
 
-Impacted Modules:
-  → [list each file and why]
+CORRECTIVE ACTIONS (numbered 1-5):
+  1. Most urgent fix
+  2. Next fix
+  ...
 
-Risk Level: [LOW / MEDIUM / HIGH]
-  → [justification]
-
-Suggested Tests:
-  → [specific things to manually test]
-
-Recommended Next Steps:
-  → [1-3 actionable items]
+Keep it concise and engineering-specific. No general advice.
 """
 
     try:
-        import urllib.request
-        import json as _json
-
-        payload = _json.dumps({
-            "model": DEFAULT_MODEL,
-            "prompt": prompt,
-            "stream": True,
-            "options": {"temperature": 0.2, "num_predict": 800},
+        import urllib.request as ur
+        payload = json.dumps({
+            "model": model, "prompt": prompt,
+            "stream": True, "options": {"temperature": 0.2, "num_predict": 900},
         }).encode()
-
-        req = urllib.request.Request(
-            OLLAMA_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-
+        req = ur.Request(OLLAMA_URL, data=payload,
+                         headers={"Content-Type": "application/json"}, method="POST")
         print()
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8").strip()
+        with ur.urlopen(req, timeout=150) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8").strip()
                 if line:
                     try:
-                        chunk = _json.loads(line)
+                        chunk = json.loads(line)
                         print(chunk.get("response", ""), end="", flush=True)
                         if chunk.get("done"):
                             break
                     except Exception:
                         pass
         print("\n")
-
     except Exception as e:
-        warn(f"Ollama analysis failed: {e}")
+        warn(f"Ollama failed: {e}")
 
-# ──────────────────────────────────────────────
-# Save Output
-# ──────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# Output saver
+# ─────────────────────────────────────────────────────────────────
 
 def save_output(content: str):
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(OUTPUTS_DIR, f"kani_analysis_{ts}.txt")
-    # Strip ANSI codes for file
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    clean = ansi_escape.sub("", content)
+    ansi = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     with open(path, "w", encoding="utf-8") as f:
-        f.write(clean)
-    status(f"Report saved → {c(path, 'cyan')}", "💾")
+        f.write(ansi.sub("", content))
+    ok(f"Report saved -> {path}")
 
-# ──────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────
-
-def run_analysis(args):
-    """Run the full Kani-Store analysis pipeline."""
-    import io as _io
-
-    # Tee: stream to terminal and capture simultaneously
-    captured = _io.StringIO()
-    _orig_write = sys.stdout.write
-
-    def _tee(text):
-        _orig_write(text)
-        captured.write(text)
-
-    sys.stdout.write = _tee  # type: ignore[method-assign]
-
-    print_banner()
-
-    last_state = load_last_state()
-
-    # ── Jira Analysis
-    jira_result = {"all_tickets": [], "has_changes": False, "new_tickets": [],
-                   "status_changes": [], "comment_additions": [], "description_updates": []}
-    if not args.github and not args.code:
-        jira_result = analyze_jira_updates(last_state)
-        print_jira_summary(jira_result)
-
-    # ── GitHub Analysis  
-    gh_result = {"latest_commit": None, "has_changes": False, "changed_files": [],
-                 "all_commits": [], "is_real_git": False, "new_commits": []}
-    if not args.jira and not args.code:
-        gh_result = analyze_github_updates(last_state)
-        jira_tickets = jira_result.get("all_tickets", [])
-        print_github_summary(gh_result, jira_tickets)
-
-    # ── Code Impact Analysis
-    code_result = {"has_changes": False, "changed_files": [], "impact": {},
-                   "diff_summary": "", "functions_changed": [], "diff_text": ""}
-    if not args.jira and not args.github:
-        code_result = analyze_code_impact()
-        jira_tickets = jira_result.get("all_tickets", [])
-        print_code_impact(code_result, jira_tickets)
-
-    # ── Affected Modules (aggregated)
-    if not (args.jira or args.github or args.code):
-        section("AFFECTED MODULES (AGGREGATED)", "[MAP]")
-        impact = code_result.get("impact", {})
-        all_affected = set(
-            impact.get("directly_changed", []) +
-            impact.get("indirectly_impacted", [])
-        )
-        gh_files = {f["path"] for f in gh_result.get("changed_files", [])}
-        if all_affected or gh_files:
-            print(f"\n  {'Module':<35} {'Type':<15} {'Risk'}")
-            print(c("  " + "-" * 65, "dim"))
-            for mod in sorted(all_affected):
-                mod_risk = "CRITICAL" if mod in CRITICAL_FILES else "Standard"
-                etype = "Direct change" if mod in impact.get("directly_changed", []) else "Impacted"
-                risk_c = c(mod_risk, "red") if mod_risk == "CRITICAL" else c(mod_risk, "dim")
-                print(f"  {c(mod, 'cyan'):<44} {etype:<15} {risk_c}")
-            for path in sorted(gh_files):
-                if path not in str(all_affected):
-                    print(f"  {c(path, 'blue'):<44} {'Commit file':<15} {c('Needs review', 'yellow')}")
-        else:
-            status("No modules currently affected", "OK", "green")
-
-    # ── Recommendations
-    if not (args.jira or args.github or args.code):
-        print_recommendations(jira_result, gh_result, code_result)
-
-    # ── AI Deep Analysis (optional)
-    if args.ai and not (args.jira or args.github or args.code):
-        run_ai_analysis(code_result, jira_result, gh_result)
-
-    # ── Save state for next run
-    new_state = {
-        "jira_tickets":     jira_result.get("all_tickets", []),
-        "last_commit_hash": (gh_result.get("latest_commit") or {}).get("hash", ""),
-        "last_run":         datetime.now().isoformat(),
-    }
-    save_state(new_state)
-
-    print(f"\n{c('  ' + '=' * 56, 'dim')}")
-    status(f"Analysis complete at {datetime.now().strftime('%H:%M:%S')}", "[DONE]", "green")
+def print_banner():
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(col("""
+  +──────────────────────────────────────────────────────────────+
+  |         Kani-Store  Smart Engineering Agent                  |
+  |                                                              |
+  |  Pillar 1: Commit Analysis + Health Scoring                  |
+  |  Pillar 2: Jira Completeness Checker                         |
+  |  Pillar 3: Cross-Layer Ripple Effect Engine                  |
+  |  Pillar 4: Failure Insight + Corrective Actions              |
+  +──────────────────────────────────────────────────────────────+""", "cyan"))
+    print(col(f"\n  [{now}]  Project root: {PROJECT_ROOT}", "dim"))
     print()
 
-    # ── finalize tee and save captured output
-    sys.stdout.write = _orig_write  # type: ignore[method-assign]
-    save_output(captured.getvalue())
 
+# ─────────────────────────────────────────────────────────────────
+# Main pipeline
+# ─────────────────────────────────────────────────────────────────
+
+def run_analysis(args):
+    buf       = io.StringIO()
+    orig_write = sys.stdout.write
+
+    def tee(text):
+        orig_write(text)
+        buf.write(text)
+    sys.stdout.write = tee  # type: ignore[method-assign]
+
+    try:
+        print_banner()
+        last_state = load_last_state()
+        tickets    = load_jira_tickets()
+
+        real_commits = get_real_commits(15)
+        sim_commits  = _load_json(GITHUB_STATE_FILE).get("commits", [])
+        all_commits  = real_commits if real_commits else sim_commits
+
+        uncommitted_files = get_uncommitted_files()
+        uncommitted_diff  = get_uncommitted_diff()
+        all_changed_paths = [f["path"] for f in uncommitted_files]
+
+        if all_commits:
+            latest_h = (all_commits[0].get("full_hash") or
+                        all_commits[0].get("hash", ""))
+            latest_files = (get_commit_files(latest_h) if real_commits
+                            else all_commits[0].get("changed_files", []))
+            all_changed_paths += [f["path"] for f in latest_files]
+
+        # Pillar 1 — Commit Analysis
+        if not args.jira:
+            commit_data = analyze_commits(getattr(args, "commit", None), tickets)
+            print_commit_analysis(commit_data)
+        else:
+            commit_data = {"commits": [], "has_real_git": bool(real_commits)}
+
+        # Pillar 2 — Jira Completeness
+        if not args.github:
+            jira_changes = analyze_jira_changes(last_state)
+            print_jira_summary(jira_changes)
+            jira_results = analyze_jira_completeness(all_commits)
+            print_jira_completeness(jira_results)
+        else:
+            jira_results = []
+
+        # Pillar 3 — Ripple Effect
+        if not args.jira:
+            blast = resolve_blast_radius(all_changed_paths)
+            print_ripple_effect(blast, all_changed_paths)
+        else:
+            blast = {"risk": "LOW", "score": 0, "directly": [], "indirect": [],
+                     "all": [], "layer_map": {}, "unchanged_but_warn": []}
+
+        # Pillar 4 — Failure Insight
+        if not args.jira and not args.github:
+            print_failure_insight(commit_data, jira_results, blast, all_changed_paths)
+
+        # Optional AI analysis
+        if args.ai:
+            diff_text = uncommitted_diff or (
+                get_commit_diff(
+                    all_commits[0].get("full_hash") or all_commits[0].get("hash", "")
+                ) if all_commits else "")
+            run_ai_analysis(diff_text, jira_results, commit_data, blast,
+                            model=getattr(args, "model", DEFAULT_MODEL))
+
+        save_state({
+            "jira_tickets":     tickets,
+            "last_commit_hash": (all_commits[0].get("full_hash") or
+                                 all_commits[0].get("hash", "")) if all_commits else "",
+            "last_run":         datetime.now().isoformat(),
+        })
+
+        print(f"\n{col('  ' + '='*60, 'dim')}")
+        ok(f"Analysis complete at {datetime.now().strftime('%H:%M:%S')}")
+
+    finally:
+        sys.stdout.write = orig_write  # type: ignore[method-assign]
+
+    save_output(buf.getvalue())
+
+
+# ─────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Kani-Store Local AI Engineering Agent",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python kani_agent.py              Full analysis
-  python kani_agent.py --jira      Jira updates only
-  python kani_agent.py --github    GitHub commits only
-  python kani_agent.py --code      Code impact only
-  python kani_agent.py --ai        Full + AI deep analysis
-  python kani_agent.py --watch     Watch mode (runs every 60s)
-        """
+    p = argparse.ArgumentParser(
+        description="Kani-Store Smart Engineering Agent — 4-pillar code reviewer",
     )
-    parser.add_argument("--jira",   action="store_true", help="Only show Jira updates")
-    parser.add_argument("--github", action="store_true", help="Only show GitHub commits")
-    parser.add_argument("--code",   action="store_true", help="Only show code impact")
-    parser.add_argument("--ai",     action="store_true", help="Enable Ollama AI deep analysis")
-    parser.add_argument("--watch",  action="store_true", help="Watch mode — re-run every 60 seconds")
-    return parser.parse_args()
+    p.add_argument("--jira",    action="store_true", help="Jira-only mode")
+    p.add_argument("--github",  action="store_true", help="GitHub/commit-only mode")
+    p.add_argument("--code",    action="store_true", help="Code diff analysis only")
+    p.add_argument("--ai",      action="store_true", help="Enable Ollama AI deep analysis")
+    p.add_argument("--commit",  metavar="HASH",      help="Analyze a specific commit hash")
+    p.add_argument("--watch",   action="store_true", help="Watch mode — re-run on file changes")
+    p.add_argument("--model",   default=DEFAULT_MODEL,
+                   help=f"Ollama model to use (default: {DEFAULT_MODEL})")
+    return p.parse_args()
 
 
 def main():
     args = parse_args()
 
     if args.watch:
-        print(c("\n  👁️  Watch mode enabled — running every 60 seconds (Ctrl+C to stop)\n", "cyan"))
+        info("Watch mode enabled — re-running on file changes (Ctrl+C to stop)")
+        last_hashes = {
+            JIRA_STATE_FILE:   file_hash(JIRA_STATE_FILE),
+            GITHUB_STATE_FILE: file_hash(GITHUB_STATE_FILE),
+        }
         try:
+            run_analysis(args)
             while True:
-                os.system("cls" if os.name == "nt" else "clear")
-                run_analysis(args)
-                print(c(f"\n  ⏳  Next check in 60s...", "dim"))
-                time.sleep(60)
+                time.sleep(4)
+                new_hashes = {
+                    JIRA_STATE_FILE:   file_hash(JIRA_STATE_FILE),
+                    GITHUB_STATE_FILE: file_hash(GITHUB_STATE_FILE),
+                }
+                if new_hashes != last_hashes:
+                    print(f"\n{col('  *** Change detected — re-running ***', 'yellow')}\n")
+                    run_analysis(args)
+                    last_hashes = new_hashes
         except KeyboardInterrupt:
-            print(c("\n\n  Stopped.\n", "dim"))
+            print("\n  Watch mode stopped.")
     else:
         run_analysis(args)
 
