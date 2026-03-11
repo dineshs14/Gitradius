@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Generated analysis outputs
+outputs/
+
+# Local example / sample input files (not part of source)
+code_before.txt
+code_after.txt
+logs.txt
+repo_structure.txt
+ticket.txt
+
+# Secrets / environment config
+.env
+.env.*
+*.env
+
+# Unrelated projects in this workspace folder
+Kani-Store/
+blast_radius_agent/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
