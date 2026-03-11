@@ -1,13 +1,39 @@
-# 🔍 AI Blast Radius Analysis Agent
+# 🤖 Agentic Blast Radius Analysis Agent
 
-A local AI-powered agent that analyzes code changes and predicts the
+A **fully autonomous, local AI agent** that analyses code changes and predicts the
 **blast radius** — which modules are impacted and how risky the change is.
 
 > **Powered by Ollama (Local AI)** — No cloud APIs needed. Runs 100% offline.
 
 ---
 
-## 🎯 4 Ways to Trigger Analysis
+## ✨ What's New — Agentic Mode
+
+| Feature | Details |
+|---|---|
+| 🤖 **ReAct Agentic Loop** | LLM plans its own tool calls, executes, reflects, then writes the report |
+| 📁 **Any File Type** | Python, JS, Go, Rust, SQL, YAML, Markdown, shell scripts, configs — auto-detected |
+| 🏗 **Big Repo Support** | Repos with 200+ files automatically switch to RAG (embedding search) |
+| 🎭 **Pseudo / Demo Mode** | Realistic mock Jira tickets + GitHub PRs — zero credentials needed |
+| 🐚 **Shell Launchers** | `run_agent.sh` (Bash/WSL) and `run_agent.ps1` (PowerShell) |
+| 🎫 **Real or Pseudo Jira** | Works with live Atlassian API or built-in mock data |
+| 🐙 **Real or Pseudo GitHub** | Works with real GitHub PRs or built-in demo diffs |
+
+---
+
+## 🎯 Trigger Modes
+
+### New Agentic Runner (`agentic_runner.py`)
+
+| Mode | Command |
+|------|---|
+| 🎭 Demo (no credentials) | `python agentic_runner.py --file ./project --pseudo` |
+| 📁 Any file/dir | `python agentic_runner.py --file ./my-project --pseudo` |
+| 🎫 Real Jira | `python agentic_runner.py --file ./my-project --jira PROJ-1 --jira-url https://...` |
+| 🐙 Real GitHub PR | `python agentic_runner.py --file . --github owner/repo --pr 42 --token ghp_xxx` |
+| 🏗 Big repo + RAG | `python agentic_runner.py --file /large/monorepo --pseudo --rag` |
+
+### Classic Runner (`agent.py`)
 
 | Mode | Command | Use Case |
 |------|---------|----------|
@@ -23,7 +49,8 @@ A local AI-powered agent that analyzes code changes and predicts the
 ### 1. Install Ollama + Pull a Model
 ```bash
 # Install from https://ollama.com, then:
-ollama pull mistral
+ollama serve          # start the server
+ollama pull mistral   # or: codellama, deepseek-coder, llama3
 ```
 
 ### 2. Install Dependencies
@@ -31,9 +58,24 @@ ollama pull mistral
 pip install -r requirements.txt
 ```
 
-### 3. Run It
+### 3a. Agentic Runner — Demo Mode (recommended first run)
 
-**Easiest: Clone a repo, make a change, trigger analysis:**
+**Windows PowerShell:**
+```powershell
+.\run_agent.ps1 -File "." -Pseudo
+```
+
+**Linux / macOS / WSL / Git Bash:**
+```bash
+bash run_agent.sh --file . --pseudo
+```
+
+**Or call Python directly:**
+```bash
+python agentic_runner.py --file . --pseudo
+```
+
+### 3b. Classic Runner — Git Repo Mode
 ```bash
 git clone https://github.com/some/project.git
 cd project
@@ -44,11 +86,6 @@ python agent.py --repo .
 **With Jira ticket context:**
 ```bash
 python agent.py --repo . --jira PROJ-1234 --jira-url https://yourcompany.atlassian.net
-```
-
-**Analyze a GitHub PR:**
-```bash
-python agent.py --github facebook/react --pr 28000
 ```
 
 ---
@@ -144,25 +181,60 @@ Explanation:
 
 ```
 blast_radius_agent/
-├── agent.py              # Main CLI agent (orchestrates everything)
-├── git_watcher.py        # Git change detection (THE TRIGGER)
-├── github_handler.py     # GitHub PR integration
-├── jira_handler.py       # Jira ticket integration
+│
+│  ── Agentic pipeline (new) ──
+├── agentic_runner.py     # 🤖 ReAct agentic orchestrator (main entry point)
+├── pseudo_setup.py       # 🎭 Mock Jira + GitHub — zero credentials needed
+├── run_agent.sh          # 🐚 Bash launcher  (Linux / macOS / WSL / Git Bash)
+├── run_agent.ps1         # 🪟 PowerShell launcher (Windows)
+│
+│  ── Classic pipeline ──
+├── agent.py              # Classic CLI agent
+├── git_watcher.py        # Git change detection
+├── github_handler.py     # Real GitHub PR integration
+├── jira_handler.py       # Real Jira ticket integration
+├── repo_chunker.py       # Universal file scanner + RAG chunker
+│
+│  ── Config / templates ──
 ├── prompt.txt            # AI prompt template (editable)
-├── ticket.txt            # Example: bug ticket
+├── ticket.txt            # Example: bug ticket (local-files mode)
 ├── logs.txt              # Example: error logs
 ├── code_before.txt       # Example: original code
 ├── code_after.txt        # Example: modified code
 ├── repo_structure.txt    # Example: repo layout
 ├── requirements.txt      # Python dependencies
 ├── README.md             # This file
-└── outputs/              # Auto-saved analysis results
+│
+└── outputs/              # Auto-saved analysis reports
+    └── agentic_analysis_*.txt
     └── analysis_*.txt
 ```
 
 ---
 
 ## ⚙️ All CLI Options
+
+### `agentic_runner.py` (new)
+
+| Flag | Description |
+|------|-------------|
+| `--file PATH` | File, directory, or git repo to scan (any file type) |
+| `--pseudo` | Demo mode — no credentials needed |
+| `--pseudo-jira TICKET` | Fake Jira ticket ID (e.g. `DEMO-42`) |
+| `--pseudo-github REPO` | Fake GitHub repo (e.g. `my-org/my-app`) |
+| `--pseudo-pr NUMBER` | Fake PR number (default: 1) |
+| `--jira TICKET-ID` | Real Jira ticket key |
+| `--jira-url URL` | Real Jira instance URL |
+| `--jira-email EMAIL` | Jira email for auth |
+| `--jira-token TOKEN` | Jira API token |
+| `--github OWNER/REPO` | Real GitHub repository |
+| `--pr NUMBER` | Pull Request number |
+| `--token TOKEN` | GitHub Personal Access Token |
+| `--model NAME` | Ollama model override (default: mistral) |
+| `--rag` | Force RAG chunking (auto-enabled for 200+ file repos) |
+| `--top-k N` | Number of RAG chunks to retrieve (default: 6) |
+
+### `agent.py` (classic)
 
 | Flag | Description |
 |------|-------------|
@@ -171,6 +243,7 @@ blast_radius_agent/
 | `--github OWNER/REPO` | GitHub repository for PR mode |
 | `--pr NUMBER` | Pull Request number |
 | `--issue NUMBER` | GitHub Issue number (optional context) |
+| `--analyze-repo` | Clone + chunk entire GitHub repo via RAG |
 | `--token TOKEN` | GitHub Personal Access Token |
 | `--jira TICKET-ID` | Jira ticket key (e.g. PROJ-1234) |
 | `--jira-url URL` | Jira instance URL |
@@ -178,6 +251,51 @@ blast_radius_agent/
 | `--jira-token TOKEN` | Jira API token for auth |
 | `--model NAME` | Ollama model override (default: mistral) |
 | `--logs-file FILE` | Local error log file to include |
+
+---
+
+## 🎭 Pseudo / Demo Mode
+
+Run the full agentic pipeline with **zero credentials** — great for demos,
+development, and first-time testing.
+
+```powershell
+# Windows
+.\run_agent.ps1 -File "C:\your\project" -Pseudo
+.\run_agent.ps1 -File "C:\your\project" -Pseudo -PseudoJira "DEMO-42" -PseudoGithub "org/repo"
+```
+
+```bash
+# Linux / macOS / WSL
+bash run_agent.sh --file /your/project --pseudo
+bash run_agent.sh --file /your/project --pseudo --pseudo-jira DEMO-42 --pseudo-github org/repo
+```
+
+`pseudo_setup.py` ships with **5 realistic ticket types** (memory leak, XSS, DB timeout,
+OAuth PKCE, CI migration) and matching multi-language diffs (Python, JavaScript, SQL, Go, YAML).
+
+---
+
+## 🏗 Large Repository Support
+
+For repos with **200+ files**, the agent automatically enables RAG (Retrieval-Augmented
+Generation):
+
+1. Scan all text files (binary files skipped by content detection)
+2. Chunk files into overlapping segments
+3. Embed chunks and the Jira/ticket query via Ollama
+4. Retrieve top-K most relevant chunks by cosine similarity
+5. Feed only the relevant code into the prompt
+
+```bash
+# Force RAG even for small repos
+python agentic_runner.py --file /large/monorepo --pseudo --rag --top-k 8
+```
+
+**File types handled automatically:**
+`.py` `.js` `.ts` `.jsx` `.tsx` `.go` `.rs` `.java` `.kt` `.rb` `.php` `.cs` `.cpp`
+`.c` `.h` `.sh` `.bash` `.zsh` `.ps1` `.sql` `.yaml` `.yml` `.json` `.toml` `.ini`
+`.env` `.md` `.rst` `.txt` `.xml` `.html` `.css` `.scss` `.dockerfile` and more.
 
 ---
 
@@ -191,6 +309,8 @@ blast_radius_agent/
 | `No changes detected` | Make some code changes first, then re-run |
 | `Jira 401` | Check your email and API token |
 | `GitHub 403` | Use `--token` to avoid rate limits |
+| PowerShell execution policy | Run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| `pseudo_setup not found` | Make sure `pseudo_setup.py` is in the same folder as `agentic_runner.py` |
 
 ---
 
